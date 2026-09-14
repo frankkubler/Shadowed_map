@@ -3,7 +3,7 @@
  * durée d'ensoleillement, et trait indiquant la direction du soleil (utile en photo
  * pour anticiper le contre-jour).
  */
-import maplibregl, { type Map as MapLibreMap } from 'maplibre-gl';
+import { Popup, type GeoJSONSource, type Map as MapLibreMap } from 'maplibre-gl';
 import type { Feature, LineString } from 'geojson';
 import { sunPosition, sunDirection } from '../sun/sun';
 import { metersPerMercatorUnit } from '../sun/mercator';
@@ -79,7 +79,7 @@ export interface PointInfoOptions {
 }
 
 export function createPointInfo({ map, query, currentDate }: PointInfoOptions) {
-  const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '260px' });
+  const popup = new Popup({ closeButton: true, maxWidth: '260px' });
   let lastPoint: { lng: number; lat: number } | null = null;
 
   const ensureSunLineLayer = () => {
@@ -106,7 +106,7 @@ export function createPointInfo({ map, query, currentDate }: PointInfoOptions) {
 
   const setSunLine = (lng: number, lat: number) => {
     ensureSunLineLayer();
-    const source = map.getSource(SUN_LINE_SOURCE) as maplibregl.GeoJSONSource | undefined;
+    const source = map.getSource(SUN_LINE_SOURCE) as GeoJSONSource | undefined;
     source?.setData({
       type: 'FeatureCollection',
       features: [sunLineFeature(lng, lat, currentDate())],
@@ -114,7 +114,7 @@ export function createPointInfo({ map, query, currentDate }: PointInfoOptions) {
   };
 
   const clearSunLine = () => {
-    const source = map.getSource(SUN_LINE_SOURCE) as maplibregl.GeoJSONSource | undefined;
+    const source = map.getSource(SUN_LINE_SOURCE) as GeoJSONSource | undefined;
     source?.setData({ type: 'FeatureCollection', features: [] });
   };
 

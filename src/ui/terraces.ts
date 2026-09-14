@@ -5,7 +5,7 @@
  * moteur — aucun calcul supplémentaire pour l'affichage courant. Seul le « jusqu'à
  * quand ? » déclenche un balayage horaire, et seulement à la demande.
  */
-import maplibregl, { type Map as MapLibreMap } from 'maplibre-gl';
+import { Popup, type ExpressionSpecification, type GeoJSONSource, type Map as MapLibreMap } from 'maplibre-gl';
 import type { Feature, FeatureCollection, Point } from 'geojson';
 import {
   createTerraceProvider,
@@ -38,7 +38,7 @@ interface TerraceRow {
 }
 
 /** Expression de peinture MapLibre associant chaque état à sa couleur validée. */
-function colorByState(): maplibregl.ExpressionSpecification {
+function colorByState(): ExpressionSpecification {
   const palette = stateColors();
   return ['match', ['get', 'state'], 'sun', palette.sun, 'shade', palette.shade, palette.unknown];
 }
@@ -144,7 +144,7 @@ export function createTerracesUi({
   };
 
   const pushToMap = () => {
-    const source = map.getSource(SOURCE) as maplibregl.GeoJSONSource | undefined;
+    const source = map.getSource(SOURCE) as GeoJSONSource | undefined;
     source?.setData(collection());
   };
 
@@ -231,7 +231,7 @@ export function createTerracesUi({
         button.append(name, meta);
         button.addEventListener('click', () => {
           map.flyTo({ center: [row.terrace.lng, row.terrace.lat], zoom: Math.max(map.getZoom(), 17) });
-          new maplibregl.Popup({ closeButton: true, maxWidth: '240px' })
+          new Popup({ closeButton: true, maxWidth: '240px' })
             .setLngLat([row.terrace.lng, row.terrace.lat])
             .setHTML(
               `<div class="point-popup"><h2>${row.terrace.name}</h2>` +

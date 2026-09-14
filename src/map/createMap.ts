@@ -1,5 +1,11 @@
 /** Initialisation de la carte MapLibre et synchronisation bidirectionnelle avec le store. */
-import maplibregl, { type Map as MapLibreMap } from 'maplibre-gl';
+import {
+  AttributionControl,
+  GeolocateControl,
+  Map as MapLibreMap,
+  NavigationControl,
+  ScaleControl,
+} from 'maplibre-gl';
 import type { Store } from '../state/appState';
 import { getBasemap, type BasemapId } from './style';
 
@@ -11,7 +17,7 @@ export interface MapHandle {
 export function createMap(container: HTMLElement, store: Store): MapHandle {
   const initial = store.get();
 
-  const map = new maplibregl.Map({
+  const map = new MapLibreMap({
     container,
     style: getBasemap('clair').style,
     center: [initial.lng, initial.lat],
@@ -23,16 +29,16 @@ export function createMap(container: HTMLElement, store: Store): MapHandle {
     attributionControl: false,
   });
 
-  map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
-  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+  map.addControl(new AttributionControl({ compact: true }), 'bottom-right');
+  map.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right');
   map.addControl(
-    new maplibregl.GeolocateControl({
+    new GeolocateControl({
       positionOptions: { enableHighAccuracy: true },
       trackUserLocation: true,
     }),
     'bottom-right',
   );
-  map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
+  map.addControl(new ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
   // Carte -> store. `applyingFromStore` coupe la boucle de rétroaction quand c'est
   // le store qui vient de déplacer la carte.
