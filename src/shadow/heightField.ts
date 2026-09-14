@@ -206,10 +206,19 @@ export class HeightField {
       return { maxHeight: terrainMax, vertexCount: 0 };
     }
 
-    const roofs = visible.map((anchor) => {
-      const ground = demCache.elevationAt(anchor.lng, anchor.lat, demZoom) ?? 0;
-      return { anchor, roof: ground + anchor.height };
+    // Un bâtiment dont on ignore l'altitude du sol est laissé de côté, et non posé à
+    // l'altitude 0 : comme les bâtiments écrasent le terrain au lieu de s'y ajouter, un
+    // toit à 8 m au milieu d'un terrain à 1000 m ne pose pas un bâtiment mais creuse un
+    // puits de mille mètres, dont le fond se retrouve à l'ombre de ses propres parois.
+    // L'arrivée de la tuile manquante déclenche de toute façon une reconstruction du
+    // champ, qui replacera le bâtiment.
+    const roofs = visible.flatMap((anchor) => {
+      const ground = demCache.elevationAt(anchor.lng, anchor.lat, demZoom);
+      return ground === null ? [] : [{ anchor, roof: ground + anchor.height }];
     });
+    if (roofs.length === 0) {
+      return { maxHeight: terrainMax, vertexCount: 0 };
+    }
     roofs.sort((a, b) => a.roof - b.roof);
 
     let vertexCount = 0;
