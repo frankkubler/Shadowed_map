@@ -43,9 +43,17 @@ function rasterStyle(tiles: string[], attribution: string, maxzoom: number): Sty
 
 const cartoSubdomains = ['a', 'b', 'c', 'd'];
 
+/**
+ * CARTO exige une clé depuis fin août 2026 : sans elle, ses tuiles reviennent barrées
+ * d'un filigrane « API KEY REQUIRED ». La clé se passe en `key=` — `api_key=` est
+ * ignoré et renvoie la tuile filigranée. Absente, on garde l'URL nue : la carte reste
+ * lisible, filigrane compris, plutôt que de ne rien afficher.
+ */
 function cartoTiles(variant: string): string[] {
+  const key = import.meta.env.CARTO_BASEMAPS_API_KEY;
+  const query = key ? `?key=${encodeURIComponent(key)}` : '';
   return cartoSubdomains.map(
-    (s) => `https://${s}.basemaps.cartocdn.com/${variant}/{z}/{x}/{y}{ratio}.png`,
+    (s) => `https://${s}.basemaps.cartocdn.com/${variant}/{z}/{x}/{y}.png${query}`,
   );
 }
 

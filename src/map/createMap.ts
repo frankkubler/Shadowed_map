@@ -5,9 +5,17 @@ import {
   Map as MapLibreMap,
   NavigationControl,
   ScaleControl,
+  setWorkerUrl,
 } from 'maplibre-gl';
+import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Store } from '../state/appState';
 import { getBasemap, type BasemapId } from './style';
+
+// Depuis la v6, MapLibre charge son worker via `import.meta.url`, que les bundlers ne
+// résolvent pas jusqu'au fichier : sans cet appel, aucune tuile n'est décodée — fond de
+// carte vide et couche d'ombre absente. `?worker&url` (et non `?url`) est indispensable,
+// le worker important lui-même `maplibre-gl-shared.mjs`.
+setWorkerUrl(workerUrl);
 
 export interface MapHandle {
   map: MapLibreMap;

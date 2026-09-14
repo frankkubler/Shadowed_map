@@ -28,7 +28,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Sans cette clé, CARTO filigrane les fonds clair et sombre du site publié.
+      # À créer dans Settings → Secrets and variables → Actions. Elle se retrouve en
+      # clair dans le bundle : c'est inhérent à un site statique, et le quota gratuit
+      # de CARTO (5 M tuiles/mois) est la seule protection.
       - run: npm run build
+        env:
+          CARTO_BASEMAPS_API_KEY: ${{ secrets.CARTO_BASEMAPS_API_KEY }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
