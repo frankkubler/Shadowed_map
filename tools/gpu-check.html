@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vérification GPU — Shadowed Map</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: system-ui, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        color-scheme: light dark;
+      }
+      h1 {
+        font-size: 18px;
+      }
+      p {
+        max-width: 60ch;
+        color: #666;
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+        max-width: 70ch;
+      }
+      li {
+        display: flex;
+        gap: 10px;
+        padding: 8px 0;
+        border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+      }
+      .mark {
+        flex: 0 0 auto;
+        font-weight: 700;
+      }
+      .pass .mark {
+        color: #1a7f37;
+      }
+      .fail .mark {
+        color: #b3261e;
+      }
+      .detail {
+        color: #777;
+        font-size: 12px;
+      }
+      canvas {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Vérification du lancer de rayon</h1>
+    <p>
+      Relief synthétique : sol plat, tour de 100 m au centre. Les résultats attendus sont
+      connus analytiquement, ce qui permet de détecter une inversion de signe ou une erreur
+      d'échelle — invisibles à l'œil sur une vraie carte.
+    </p>
+    <ul id="results"></ul>
+    <canvas id="gl" width="8" height="8"></canvas>
+
+    <script type="module">
+      import { runGpuChecks, runTerrainChecks } from './gpuCheck.ts';
+
+      const canvas = document.getElementById('gl');
+      const list = document.getElementById('results');
+
+      let results = [];
+
+      // Rendu progressif : la partie sur relief réel télécharge des dizaines de tuiles,
+      // autant afficher les résultats synthétiques sans attendre.
+      const render = () => {
+        list.replaceChildren(
+          ...results.map((result) => {
+            const item = document.createElement('li');
+            item.className = result.passed ? 'pass' : 'fail';
+            item.innerHTML =
+              `<span class="mark">${result.passed ? '✓' : '✗'}</span>` +
+              `<span><strong>${result.name}</strong><br><span class="detail">${result.detail}</span></span>`;
+            return item;
+          }),
+        );
+        window.__GPU_CHECK__ = results;
+      };
+
+      try {
+        results = runGpuChecks(canvas);
+      } catch (error) {
+        results = [{ name: 'Exception (relief synthétique)', passed: false, detail: String(error) }];
+      }
+      render();
+
+      try {
+        results = results.concat(await runTerrainChecks(canvas));
+      } catch (error) {
+        results = results.concat([
+          { name: 'Exception (relief réel)', passed: false, detail: String(error) },
+        ]);
+      }
+      render();
+
+      window.__GPU_CHECK_DONE__ = true;
+      document.title = results.every((r) => r.passed) ? 'GPU check: OK' : 'GPU check: ÉCHEC';
+    </script>
+  </body>
+</html>

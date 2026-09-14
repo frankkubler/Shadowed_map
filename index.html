@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Shadowed Map — où est le soleil ?</title>
+    <meta
+      name="description"
+      content="Carte des ombres du soleil : relief et bâtiments, partout, à n'importe quelle heure. Terrasses ensoleillées, golden hour, heures de soleil."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="preconnect" href="https://s3.amazonaws.com" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%23f0a500'/%3E%3Cpath d='M16 16 L32 32 L4 32 Z' fill='%232a2f45' opacity='.75'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="map" aria-label="Carte des ombres"></div>
+
+    <header class="topbar">
+      <h1 class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        Shadowed&nbsp;Map
+      </h1>
+      <form class="search" id="search-form" role="search">
+        <input
+          id="search-input"
+          type="search"
+          placeholder="Chercher un lieu, une adresse…"
+          autocomplete="off"
+          aria-label="Chercher un lieu"
+        />
+        <button type="submit" aria-label="Lancer la recherche">Chercher</button>
+      </form>
+      <ul class="search-results" id="search-results" hidden></ul>
+    </header>
+
+    <div class="banner" id="banner" hidden role="status"></div>
+
+    <aside class="panel" id="panel">
+      <button class="panel-toggle" id="panel-toggle" aria-expanded="true" aria-controls="panel-body">
+        Réglages
+      </button>
+
+      <div class="panel-body" id="panel-body">
+        <section class="controls">
+          <div class="row">
+            <label for="date-input">Date</label>
+            <div class="date-group">
+              <button type="button" id="day-prev" aria-label="Jour précédent">‹</button>
+              <input type="date" id="date-input" />
+              <button type="button" id="day-next" aria-label="Jour suivant">›</button>
+            </div>
+          </div>
+
+          <div class="row">
+            <label for="time-slider">Heure <output id="time-output">12:00</output></label>
+            <input
+              type="range"
+              id="time-slider"
+              min="0"
+              max="1439"
+              step="5"
+              aria-describedby="time-output"
+            />
+          </div>
+
+          <div class="row buttons">
+            <button type="button" id="play-button" aria-pressed="false">▶ Animer la journée</button>
+            <button type="button" id="now-button">Maintenant</button>
+          </div>
+
+          <div class="row">
+            <span class="row-label">Affichage</span>
+            <div class="segmented" role="radiogroup" aria-label="Mode d'affichage">
+              <button type="button" data-mode="shadow" role="radio" aria-checked="true">Ombre</button>
+              <button type="button" data-mode="exposure" role="radio" aria-checked="false">
+                Heures de soleil
+              </button>
+            </div>
+          </div>
+
+          <div class="row" id="exposure-progress-row" hidden>
+            <span class="row-label">Calcul en cours</span>
+            <progress id="exposure-progress" max="1" value="0"></progress>
+          </div>
+
+          <div class="row">
+            <span class="row-label">Fond de carte</span>
+            <div class="segmented" id="basemap-group" role="radiogroup" aria-label="Fond de carte"></div>
+          </div>
+
+          <div class="row">
+            <label for="opacity-slider">Intensité de l'ombre</label>
+            <input type="range" id="opacity-slider" min="10" max="90" step="5" value="55" />
+          </div>
+        </section>
+
+        <section class="sun-info" id="sun-info" aria-live="polite"></section>
+
+        <section class="legend" id="legend" hidden>
+          <span class="legend-title">Heures de soleil</span>
+          <div class="legend-ramp" aria-hidden="true"></div>
+          <div class="legend-scale"><span>0 h</span><span id="legend-max">—</span></div>
+        </section>
+
+        <p class="disclaimer">
+          Estimation à partir du relief (AWS Terrain Tiles) et des hauteurs de bâtiments
+          d'OpenStreetMap, souvent approximatives. La végétation n'est pas modélisée.
+          À ne pas utiliser pour du dimensionnement.
+        </p>
+      </div>
+    </aside>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
