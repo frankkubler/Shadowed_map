@@ -13,6 +13,12 @@
   --shadow-ui: 0 6px 24px rgba(16, 20, 38, 0.14);
   --radius: 12px;
   --panel-width: 340px;
+
+  /* Encodage soleil / ombre. Couple validé sur fond blanc : bande de clarté, chroma,
+     contraste, et séparation en vision déficiente (ΔE ≈ 29 en protanopie). */
+  --sun: #c9741a;
+  --shade: #43509e;
+  --state-unknown: #9aa0b4;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -26,6 +32,11 @@
     --accent: #f0a500;
     --accent-contrast: #1a1204;
     --shadow-ui: 0 6px 24px rgba(0, 0, 0, 0.45);
+
+    /* Mêmes teintes, redosées pour le fond sombre plutôt que simplement éclaircies. */
+    --sun: #c9801a;
+    --shade: #6b76d0;
+    --state-unknown: #767c92;
   }
 }
 
@@ -507,4 +518,189 @@ progress {
   .sun-info {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* --- Terrasses et parcours ------------------------------------------------ */
+
+.feature {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.feature-summary {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.feature-summary.is-error {
+  color: #b3261e;
+}
+
+.terrace-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.terrace-list li + li {
+  border-top: 1px solid var(--border);
+}
+
+.terrace-list button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+}
+
+.terrace-list button:hover {
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.terrace-name {
+  font-weight: 600;
+}
+
+/* Une pastille colorée redit l'état porté par le texte : la couleur seule ne doit
+   jamais être le seul véhicule de l'information. */
+.terrace-name::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--state-unknown);
+}
+
+.terrace-sun .terrace-name::before {
+  background: var(--sun);
+}
+
+.terrace-shade .terrace-name::before {
+  background: var(--shade);
+}
+
+.terrace-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* L'input natif est masqué au profit d'un label stylé comme les autres boutons. */
+#track-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-button {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-solid);
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.file-button:hover {
+  border-color: var(--accent);
+}
+
+#track-file:focus-visible + .file-button,
+.file-button:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Contrôles et profil n'ont de sens qu'une fois une trace chargée. */
+#track-section:not([data-loaded='true']) .track-controls,
+#track-section:not([data-loaded='true']) .profile-host,
+#track-section:not([data-loaded='true']) .profile-legend,
+#track-section:not([data-loaded='true']) #track-stats,
+#track-section:not([data-loaded='true']) #track-clear {
+  display: none;
+}
+
+.profile-figure {
+  position: relative;
+  margin-top: 10px;
+}
+
+.profile-figure svg {
+  display: block;
+  width: 100%;
+  height: 120px;
+}
+
+.profile-tooltip {
+  position: absolute;
+  top: -4px;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-ui);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.profile-legend {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.profile-legend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.swatch-sun {
+  background: var(--sun);
+}
+
+.swatch-shade {
+  background: var(--shade);
+}
+
+/* Retour visuel pendant un glisser-déposer de fichier GPX. */
+#map.is-drop-target::after {
+  content: 'Déposez votre trace GPX';
+  position: absolute;
+  inset: 12px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  background: rgba(127, 127, 127, 0.12);
+  font-weight: 600;
+  pointer-events: none;
 }

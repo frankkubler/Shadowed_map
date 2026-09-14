@@ -10,6 +10,9 @@ import { MIN_BUILDING_ZOOM } from './shadow/buildings';
 import { createSunPanel } from './ui/sunPanel';
 import { createSearchUi } from './ui/search';
 import { createPointInfo } from './ui/pointInfo';
+import { createTerracesUi } from './ui/terraces';
+import { createTrackUi } from './ui/track';
+import { onColorSchemeChange, stateColors } from './ui/palette';
 import {
   formatDuration,
   formatMinutesOfDay,
@@ -41,6 +44,12 @@ function main(): void {
     banner.dataset['tone'] = tone;
   };
 
+  const setBusy = (label: string | null) => {
+    busyLabel = label;
+    if (engineState) renderEngineState(engineState);
+    else showBanner(label);
+  };
+
   // --- Moteur d'ombre -------------------------------------------------------
 
   const opacitySlider = requireElement<HTMLInputElement>('opacity-slider');
@@ -50,6 +59,8 @@ function main(): void {
   const legendMax = requireElement('legend-max');
 
   let engineState: ShadowLayerState | null = null;
+  /** Message posé par un calcul long (balayage de terrasses ou de parcours). */
+  let busyLabel: string | null = null;
 
   const shadowLayer = new ShadowLayer({
     shadowColor: [0.05, 0.07, 0.18],
@@ -66,9 +77,10 @@ function main(): void {
       return;
     }
 
-    const inProgress = state.exposureProgress !== null && state.exposureProgress < 1;
-    exposureRow.hidden = !inProgress;
-    exposureProgress.value = state.exposureProgress ?? 0;
+    const exposing = state.exposureProgress !== null && state.exposureProgress < 1;
+    const sweeping = state.sweepProgress !== null;
+    exposureRow.hidden = !exposing && !sweeping;
+    exposureProgress.value = (sweeping ? state.sweepProgress : state.exposureProgress) ?? 0;
 
     if (store.get().mode === 'exposure') {
       legend.hidden = false;
@@ -77,8 +89,10 @@ function main(): void {
       legend.hidden = true;
     }
 
-    if (inProgress) {
+    if (exposing) {
       showBanner("Calcul des heures d'ensoleillement…");
+    } else if (busyLabel) {
+      showBanner(busyLabel);
     } else if (state.buildings === 'loading') {
       showBanner('Chargement des bâtiments…');
     } else if (state.buildings === 'error') {
@@ -100,13 +114,15 @@ function main(): void {
   const installLayer = () => {
     try {
       if (!map.getLayer(shadowLayer.id)) map.addLayer(shadowLayer);
+      // L'ordre compte : terrasses et trace se lisent par-dessus l'ombre.
+      terraces.installLayers();
+      trackUi.installLayers();
       pointInfo.reinstall();
     } catch (error) {
       // Le style n'est pas encore exploitable : le prochain `styledata` réessaiera.
       void error;
     }
   };
-  map.on('styledata', installLayer);
 
   // --- Popup et direction du soleil ----------------------------------------
 
@@ -114,6 +130,66 @@ function main(): void {
     map,
     query: (lng, lat) => shadowLayer.queryPoint(lng, lat),
     currentDate: () => store.get().date,
+  });
+
+  // --- Terrasses au soleil --------------------------------------------------
+
+  const terraces = createTerracesUi({
+    map,
+    shadowLayer,
+    list: requireElement<HTMLUListElement>('terraces-list'),
+    summary: requireElement('terraces-summary'),
+    sweepButton: requireElement<HTMLButtonElement>('terraces-sweep'),
+    currentDate: () => store.get().date,
+    onBusy: (busy) => setBusy(busy ? 'Recherche des heures d’ensoleillement…' : null),
+  });
+
+  const terraceButtons = {
+    off: requireElement<HTMLButtonElement>('terraces-off'),
+    on: requireElement<HTMLButtonElement>('terraces-on'),
+  };
+  const setTerraces = (enabled: boolean) => {
+    terraceButtons.on.setAttribute('aria-checked', String(enabled));
+    terraceButtons.off.setAttribute('aria-checked', String(!enabled));
+    terraces.setEnabled(enabled);
+    if (enabled) terraces.onMove();
+  };
+  terraceButtons.on.addEventListener('click', () => setTerraces(true));
+  terraceButtons.off.addEventListener('click', () => setTerraces(false));
+
+  // --- Parcours GPX ---------------------------------------------------------
+
+  const trackUi = createTrackUi({
+    map,
+    shadowLayer,
+    root: requireElement('track-section'),
+    fileInput: requireElement<HTMLInputElement>('track-file'),
+    clearButton: requireElement<HTMLButtonElement>('track-clear'),
+    departureInput: requireElement<HTMLInputElement>('track-departure'),
+    speedInput: requireElement<HTMLInputElement>('track-speed'),
+    speedOutput: requireElement<HTMLOutputElement>('track-speed-output'),
+    profileHost: requireElement('track-profile'),
+    statsHost: requireElement('track-stats'),
+    messageHost: requireElement('track-message'),
+    colors: stateColors,
+    currentDate: () => store.get().date,
+    onBusy: (busy) => setBusy(busy ? 'Calcul du profil du parcours…' : null),
+  });
+
+  map.on('moveend', () => terraces.onMove());
+
+  // L'installation des couches est branchée seulement maintenant : `installLayer`
+  // référence `terraces` et `trackUi`, qui viennent d'être créés.
+  map.on('styledata', installLayer);
+  installLayer();
+
+  // MapLibre fige les couleurs de peinture à l'ajout de la couche : une bascule
+  // clair/sombre doit forcer leur réinstallation.
+  onColorSchemeChange(() => {
+    for (const id of ['terraces-likely', 'terraces-confirmed', 'track-line']) {
+      if (map.getLayer(id)) map.removeLayer(id);
+    }
+    installLayer();
   });
 
   // --- Contrôles temporels --------------------------------------------------
@@ -292,6 +368,8 @@ function main(): void {
       syncTimeControls(state);
       shadowLayer.setDate(state.date);
       pointInfo.refresh();
+      terraces.refreshStates();
+      trackUi.onDateChange();
     }
     if (!changed || changed.has('mode')) {
       syncModeButtons(state);

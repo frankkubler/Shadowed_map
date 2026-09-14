@@ -89,6 +89,42 @@ describe('computeFieldRegion', () => {
   });
 });
 
+describe('marge omnidirectionnelle', () => {
+  const omni = computeFieldRegion({
+    visible,
+    sunDir: sunDirection(Math.PI / 2),
+    sunAltitude: Math.PI / 6,
+    reliefMeters: 2000,
+    omnidirectional: true,
+  }).region;
+
+  it('étend les quatre côtés', () => {
+    expect(omni.x0).toBeLessThan(visible.x0);
+    expect(omni.x1).toBeGreaterThan(visible.x1);
+    expect(omni.y0).toBeLessThan(visible.y0);
+    expect(omni.y1).toBeGreaterThan(visible.y1);
+  });
+
+  it('reste centrée sur la vue', () => {
+    expect((omni.x0 + omni.x1) / 2).toBeCloseTo((visible.x0 + visible.x1) / 2, 12);
+    expect((omni.y0 + omni.y1) / 2).toBeCloseTo((visible.y0 + visible.y1) / 2, 12);
+  });
+
+  it("contient la région qu'aurait produite n'importe quel azimut", () => {
+    // C'est la propriété qui compte : un balayage horaire fait tourner le soleil, et
+    // le champ doit couvrir les obstacles de toutes les directions à la fois.
+    for (let azimuth = -Math.PI; azimuth <= Math.PI; azimuth += Math.PI / 8) {
+      const oriented = computeFieldRegion({
+        visible,
+        sunDir: sunDirection(azimuth),
+        sunAltitude: Math.PI / 6,
+        reliefMeters: 2000,
+      }).region;
+      expect(regionContains(omni, oriented)).toBe(true);
+    }
+  });
+});
+
 describe('squareRegion', () => {
   it('rend la région carrée sans déplacer son centre', () => {
     const square = squareRegion(visible);

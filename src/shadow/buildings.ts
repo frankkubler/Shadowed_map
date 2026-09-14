@@ -1,20 +1,18 @@
 /**
- * Empreintes et hauteurs de bâtiments, depuis OpenStreetMap via l'API Overpass.
+ * Empreintes et hauteurs de bâtiments, depuis OpenStreetMap.
  *
- * Overpass est un service bénévole et fragile : toute la logique de ce fichier vise
- * à en faire un usage sobre — une requête par déplacement significatif, résultats
- * réutilisés tant que la nouvelle vue tient dans une enveloppe déjà téléchargée,
- * annulation des requêtes obsolètes, et bascule sur un miroir en cas d'échec.
+ * Le transport (miroirs, anti-rebond, cache par enveloppe, annulation) est mutualisé
+ * dans `src/data/overpass.ts` ; ici on ne s'occupe que d'interpréter les tags et de
+ * transformer les empreintes en triangles.
  */
 import earcut from 'earcut';
 import { latToMercatorY, lngToMercatorX, type Bounds } from '../sun/mercator';
-
-/** Miroirs essayés dans l'ordre. Le premier qui répond gagne. */
-const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.osm.ch/api/interpreter',
-];
+import {
+  bboxClause,
+  BboxProvider,
+  type BboxResult,
+  type OverpassElement,
+} from '../data/overpass';
 
 /** En dessous, la densité de bâtiments rend la requête trop lourde pour Overpass. */
 export const MIN_BUILDING_ZOOM = 15;
@@ -39,14 +37,6 @@ export const EMPTY_MESH: BuildingMesh = {
   heights: new Float32Array(0),
   anchors: [],
 };
-
-interface OverpassElement {
-  type: 'way' | 'relation' | 'node';
-  id: number;
-  tags?: Record<string, string>;
-  geometry?: { lat: number; lon: number }[];
-  members?: { type: string; role: string; geometry?: { lat: number; lon: number }[] }[];
-}
 
 /**
  * Interprète les tags de hauteur d'OSM.
@@ -78,10 +68,8 @@ export function parseBuildingHeight(tags: Record<string, string> | undefined): n
   return DEFAULT_BUILDING_HEIGHT;
 }
 
-function buildOverpassQuery(bounds: Bounds): string {
-  const bbox = [bounds.south, bounds.west, bounds.north, bounds.east]
-    .map((v) => v.toFixed(6))
-    .join(',');
+function buildingQuery(bounds: Bounds): string {
+  const bbox = bboxClause(bounds);
   // `out geom` renvoie la géométrie en ligne : pas besoin de résoudre les nœuds
   // séparément, ce qui divise par deux le volume transféré.
   return `[out:json][timeout:25];(way["building"](${bbox});relation["building"]["type"="multipolygon"](${bbox}););out geom qt;`;
@@ -152,135 +140,23 @@ export function meshFromOverpass(elements: OverpassElement[]): BuildingMesh {
   };
 }
 
-function boundsContain(outer: Bounds, inner: Bounds): boolean {
-  return (
-    outer.west <= inner.west &&
-    outer.south <= inner.south &&
-    outer.east >= inner.east &&
-    outer.north >= inner.north
-  );
-}
-
-function padBounds(bounds: Bounds, ratio: number): Bounds {
-  const dLng = (bounds.east - bounds.west) * ratio;
-  const dLat = (bounds.north - bounds.south) * ratio;
-  return {
-    west: bounds.west - dLng,
-    east: bounds.east + dLng,
-    south: bounds.south - dLat,
-    north: bounds.north + dLat,
-  };
-}
-
-export type BuildingStatus = 'idle' | 'loading' | 'ready' | 'error' | 'zoomed-out';
-
-export interface BuildingResult {
-  mesh: BuildingMesh;
-  bounds: Bounds | null;
-  status: BuildingStatus;
-}
+export type BuildingResult = BboxResult<BuildingMesh>;
 
 /**
- * Récupère les bâtiments pour une vue, en réutilisant autant que possible ce qui a
- * déjà été téléchargé.
+ * Fournisseur de bâtiments pour la vue courante.
  *
- * La zone demandée est élargie de 40 % : on paie un peu plus de données une fois,
- * mais un déplacement modéré de la carte ne redéclenche aucune requête.
+ * En dessous de `MIN_BUILDING_ZOOM`, la densité rend la requête trop lourde pour
+ * Overpass : le provider renvoie alors un maillage vide avec le statut `zoomed-out`,
+ * ce que l'interface traduit par une invitation à zoomer.
  */
-export class BuildingProvider {
-  private cachedBounds: Bounds | null = null;
-  private cachedMesh: BuildingMesh = EMPTY_MESH;
-  private controller: AbortController | null = null;
-  private status: BuildingStatus = 'idle';
-  private endpointIndex = 0;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-
-  constructor(
-    private readonly onUpdate: (result: BuildingResult) => void,
-    private readonly debounceMs = 800,
-  ) {}
-
-  current(): BuildingResult {
-    return { mesh: this.cachedMesh, bounds: this.cachedBounds, status: this.status };
-  }
-
-  /** À appeler après chaque déplacement de carte. Ne déclenche une requête que si nécessaire. */
-  request(bounds: Bounds, zoom: number): void {
-    if (zoom < MIN_BUILDING_ZOOM) {
-      this.cancel();
-      if (this.cachedMesh !== EMPTY_MESH || this.status !== 'zoomed-out') {
-        this.cachedMesh = EMPTY_MESH;
-        this.cachedBounds = null;
-        this.status = 'zoomed-out';
-        this.onUpdate(this.current());
-      }
-      return;
-    }
-
-    if (this.cachedBounds && boundsContain(this.cachedBounds, bounds)) return;
-
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      void this.fetchNow(padBounds(bounds, 0.4));
-    }, this.debounceMs);
-  }
-
-  cancel(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    this.controller?.abort();
-    this.controller = null;
-  }
-
-  private async fetchNow(bounds: Bounds): Promise<void> {
-    this.controller?.abort();
-    const controller = new AbortController();
-    this.controller = controller;
-
-    this.status = 'loading';
-    this.onUpdate(this.current());
-
-    const query = buildOverpassQuery(bounds);
-
-    // On essaie chaque miroir une fois, en repartant de celui qui a marché la
-    // dernière fois pour ne pas retomber systématiquement sur un serveur saturé.
-    for (let attempt = 0; attempt < OVERPASS_ENDPOINTS.length; attempt++) {
-      const index = (this.endpointIndex + attempt) % OVERPASS_ENDPOINTS.length;
-      const endpoint = OVERPASS_ENDPOINTS[index];
-      if (!endpoint) continue;
-
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          body: `data=${encodeURIComponent(query)}`,
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          signal: controller.signal,
-        });
-        if (!response.ok) continue;
-
-        const json = (await response.json()) as { elements?: OverpassElement[] };
-        if (controller.signal.aborted) return;
-
-        this.endpointIndex = index;
-        this.cachedMesh = meshFromOverpass(json.elements ?? []);
-        this.cachedBounds = bounds;
-        this.status = 'ready';
-        this.controller = null;
-        this.onUpdate(this.current());
-        return;
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        // Miroir suivant.
-        void error;
-      }
-    }
-
-    if (controller.signal.aborted) return;
-    this.controller = null;
-    this.status = 'error';
-    this.onUpdate(this.current());
-  }
+export function createBuildingProvider(
+  onUpdate: (result: BuildingResult) => void,
+): BboxProvider<BuildingMesh> {
+  return new BboxProvider<BuildingMesh>({
+    minZoom: MIN_BUILDING_ZOOM,
+    empty: EMPTY_MESH,
+    buildQuery: buildingQuery,
+    parse: meshFromOverpass,
+    onUpdate,
+  });
 }

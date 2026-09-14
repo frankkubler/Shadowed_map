@@ -80,6 +80,15 @@ export interface FieldRegionOptions {
   sunAltitude: number;
   /** Dénivelé maximal connu dans la zone, en mètres. */
   reliefMeters?: number;
+  /**
+   * Étend la marge des quatre côtés au lieu du seul côté du soleil.
+   *
+   * Indispensable dès qu'on balaie plusieurs heures avec le même champ : le soleil fait
+   * le tour de l'horizon dans la journée, et une marge posée pour le matin manque les
+   * obstacles de l'ouest en fin d'après-midi. L'erreur serait invisible — l'ombre
+   * manquante ressemble à du soleil.
+   */
+  omnidirectional?: boolean;
 }
 
 export interface FieldRegion {
@@ -99,6 +108,7 @@ export function computeFieldRegion({
   sunDir,
   sunAltitude,
   reliefMeters = FALLBACK_RELIEF_METERS,
+  omnidirectional = false,
 }: FieldRegionOptions): FieldRegion {
   const lat = regionCenterLat(visible);
   const metersPerUnit = metersPerMercatorUnit(lat);
@@ -116,12 +126,19 @@ export function computeFieldRegion({
   const dx = sunDir.east * marginUnits;
   const dy = -sunDir.north * marginUnits;
 
-  const region: MercatorRegion = {
-    x0: visible.x0 + Math.min(0, dx),
-    x1: visible.x1 + Math.max(0, dx),
-    y0: visible.y0 + Math.min(0, dy),
-    y1: visible.y1 + Math.max(0, dy),
-  };
+  const region: MercatorRegion = omnidirectional
+    ? {
+        x0: visible.x0 - marginUnits,
+        x1: visible.x1 + marginUnits,
+        y0: visible.y0 - marginUnits,
+        y1: visible.y1 + marginUnits,
+      }
+    : {
+        x0: visible.x0 + Math.min(0, dx),
+        x1: visible.x1 + Math.max(0, dx),
+        y0: visible.y0 + Math.min(0, dy),
+        y1: visible.y1 + Math.max(0, dy),
+      };
 
   return {
     region,

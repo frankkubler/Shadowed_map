@@ -187,6 +187,38 @@ export function runGpuChecks(canvas: HTMLCanvasElement): CheckResult[] {
     `valeur = ${shadowAt(TOWER_CENTER, TOWER_CENTER - 150).toFixed(2)} (attendu 1)`,
   );
 
+  // --- Rotation sur la journée ------------------------------------------------------
+  // L'ombre doit suivre le soleil tout autour de l'horizon. C'est la propriété dont
+  // dépendent le balayage horaire des terrasses et le profil d'un parcours : si elle
+  // n'était vérifiée que pour un azimut, une erreur de repère resterait invisible.
+  let rotationOk = true;
+  const rotationDetails: string[] = [];
+  for (const azimuthDeg of [-120, -60, 0, 60, 120]) {
+    const azimuth = (azimuthDeg * Math.PI) / 180;
+    const towardSun = sunDirection(azimuth);
+    const texelDir: [number, number] = [towardSun.east, -towardSun.north];
+    pass.renderShadow(params, { dir: texelDir, tanAltitude: Math.tan(Math.PI / 4) }, false);
+
+    // Sondes à 30 texels (60 m), dans l'ombre attendue et du côté du soleil.
+    const probeDistance = 30;
+    const shadowed = shadowAt(
+      TOWER_CENTER - texelDir[0] * probeDistance,
+      TOWER_CENTER - texelDir[1] * probeDistance,
+    );
+    const lit = shadowAt(
+      TOWER_CENTER + texelDir[0] * probeDistance,
+      TOWER_CENTER + texelDir[1] * probeDistance,
+    );
+
+    if (!(shadowed > 0.5 && lit < 0.5)) rotationOk = false;
+    rotationDetails.push(`${azimuthDeg}° : ombre ${shadowed.toFixed(2)} / soleil ${lit.toFixed(2)}`);
+  }
+  check(
+    'L’ombre suit le soleil sur tout le tour de l’horizon',
+    rotationOk,
+    rotationDetails.join(' — '),
+  );
+
   // --- Nuit -------------------------------------------------------------------------
   pass.renderShadow(params, { dir: [0, 1], tanAltitude: 0.1 }, true);
   check(

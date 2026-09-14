@@ -62,6 +62,9 @@ export interface MarchParams {
   stepGrowth: number;
 }
 
+/** Masque affiché (`main`) ou masque de travail des balayages (`sweep`). */
+export type MaskTarget = 'main' | 'sweep';
+
 export interface SunSample {
   /** Direction vers le soleil en espace texel : (est, -nord). */
   dir: [number, number];
@@ -74,9 +77,21 @@ export class ShadowPass {
   private exposureProgram: WebGLProgram;
   private exposureUniforms: UniformCache;
 
-  private mask: RenderTarget;
+  /**
+   * Deux masques distincts.
+   *
+   * `main` porte l'heure affichée ; `sweep` sert aux balayages horaires. Les séparer
+   * évite qu'un balayage n'écrase l'ombre à l'écran — et donc que les états lus juste
+   * après ne correspondent au dernier instant balayé plutôt qu'à l'heure courante.
+   */
+  private masks: { main: RenderTarget; sweep: RenderTarget };
   private exposure: [RenderTarget, RenderTarget];
   private exposureIndex = 0;
+  /** Copies CPU des masques, relues paresseusement et invalidées à chaque rendu. */
+  private buffers: { main: Uint8Array | null; sweep: Uint8Array | null } = {
+    main: null,
+    sweep: null,
+  };
 
   constructor(
     private readonly gl: WebGL2RenderingContext,
@@ -89,9 +104,9 @@ export class ShadowPass {
     this.exposureProgram = createProgram(gl, FULLSCREEN_VERT, EXPOSURE_FRAG);
     this.exposureUniforms = new UniformCache(gl, this.exposureProgram);
 
-    this.mask = createRenderTarget(
-      gl, maskSize, maskSize, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR,
-    );
+    const makeMask = () =>
+      createRenderTarget(gl, maskSize, maskSize, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    this.masks = { main: makeMask(), sweep: makeMask() };
     this.exposure = [
       createRenderTarget(gl, exposureSize, exposureSize, gl.R32F, gl.RED, gl.FLOAT, gl.NEAREST),
       createRenderTarget(gl, exposureSize, exposureSize, gl.R32F, gl.RED, gl.FLOAT, gl.NEAREST),
@@ -99,7 +114,7 @@ export class ShadowPass {
   }
 
   get maskTexture(): WebGLTexture {
-    return this.mask.texture;
+    return this.masks.main.texture;
   }
 
   get exposureTexture(): WebGLTexture {
@@ -107,7 +122,7 @@ export class ShadowPass {
   }
 
   get maskSize(): number {
-    return this.mask.width;
+    return this.masks.main.width;
   }
 
   /** Prépare les états GL communs et lie le quad plein écran. */
@@ -142,15 +157,24 @@ export class ShadowPass {
     );
   }
 
-  /** Ombre à un instant donné. `night` force l'ombre totale quand le soleil est couché. */
-  renderShadow(params: MarchParams, sun: SunSample, night: boolean): void {
+  /**
+   * Ombre à un instant donné. `night` force l'ombre totale quand le soleil est couché.
+   * `target` choisit le masque affiché ou celui réservé aux balayages.
+   */
+  renderShadow(
+    params: MarchParams,
+    sun: SunSample,
+    night: boolean,
+    target: MaskTarget = 'main',
+  ): void {
     const { gl } = this;
-    const posLoc = this.beginPass(this.shadowProgram, this.mask);
+    const posLoc = this.beginPass(this.shadowProgram, this.masks[target]);
     this.setMarchUniforms(this.shadowUniforms, params);
     gl.uniform2f(this.shadowUniforms.at('u_sunDir'), sun.dir[0], sun.dir[1]);
     gl.uniform1f(this.shadowUniforms.at('u_tanAltitude'), sun.tanAltitude);
     gl.uniform1f(this.shadowUniforms.at('u_night'), night ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+    this.buffers[target] = null;
     gl.disableVertexAttribArray(posLoc);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
@@ -209,22 +233,41 @@ export class ShadowPass {
   }
 
   /**
+   * Copie CPU du masque entier, relue au plus une fois par rendu.
+   *
+   * Chaque `readPixels` force une synchronisation avec le GPU. En interroger un par
+   * point coûterait une synchronisation par terrasse ou par point de trace GPX, ce qui
+   * fige l'interface ; une lecture complète de 4 Mo en coûte une seule.
+   */
+  readMaskBuffer(target: MaskTarget = 'main'): Uint8Array {
+    const cached = this.buffers[target];
+    if (cached) return cached;
+
+    const { gl } = this;
+    const mask = this.masks[target];
+    const buffer = new Uint8Array(mask.width * mask.height * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, mask.framebuffer);
+    gl.readPixels(0, 0, mask.width, mask.height, gl.RGBA, gl.UNSIGNED_BYTE, buffer);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    this.buffers[target] = buffer;
+    return buffer;
+  }
+
+  /**
    * Lit une valeur du masque d'ombre. `u` et `v` sont dans [0, 1] sur la région du masque,
    * v = 0 au nord.
    */
   readMask(u: number, v: number): { shadow: number; hasData: boolean } | null {
-    const { gl } = this;
     if (u < 0 || u > 1 || v < 0 || v > 1) return null;
 
-    const x = Math.min(this.mask.width - 1, Math.max(0, Math.floor(u * this.mask.width)));
-    const y = Math.min(this.mask.height - 1, Math.max(0, Math.floor(v * this.mask.height)));
+    const buffer = this.readMaskBuffer();
+    const mask = this.masks.main;
+    const x = Math.min(mask.width - 1, Math.max(0, Math.floor(u * mask.width)));
+    const y = Math.min(mask.height - 1, Math.max(0, Math.floor(v * mask.height)));
+    const offset = (y * mask.width + x) * 4;
 
-    const pixel = new Uint8Array(4);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mask.framebuffer);
-    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-
-    return { shadow: (pixel[0] ?? 0) / 255, hasData: (pixel[1] ?? 0) > 127 };
+    return { shadow: (buffer[offset] ?? 0) / 255, hasData: (buffer[offset + 1] ?? 0) > 127 };
   }
 
   /** Lit l'ensoleillement cumulé en un point, en minutes. */
@@ -244,7 +287,8 @@ export class ShadowPass {
   }
 
   dispose(): void {
-    deleteRenderTarget(this.gl, this.mask);
+    deleteRenderTarget(this.gl, this.masks.main);
+    deleteRenderTarget(this.gl, this.masks.sweep);
     for (const target of this.exposure) deleteRenderTarget(this.gl, target);
     this.gl.deleteProgram(this.shadowProgram);
     this.gl.deleteProgram(this.exposureProgram);

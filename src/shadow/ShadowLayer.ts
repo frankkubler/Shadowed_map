@@ -16,12 +16,19 @@ import {
   type Bounds,
 } from '../sun/mercator';
 import { isDaylight, sunDirection, sunPosition, MIN_USEFUL_ALTITUDE_RAD } from '../sun/sun';
-import { BuildingProvider, EMPTY_MESH, MIN_BUILDING_ZOOM, type BuildingResult } from './buildings';
+import { createBuildingProvider, EMPTY_MESH, MIN_BUILDING_ZOOM, type BuildingResult } from './buildings';
 import { DemTileCache } from './demTiles';
 import { createUnitQuad, detectCapabilities } from './glUtils';
 import { ProjectionProgramCache, setProjectionUniforms } from './projection';
 import { HeightField } from './heightField';
-import { EXPOSURE_BATCH_SIZE, ShadowPass, solveStepGrowth, type MarchParams, type SunSample } from './raymarch';
+import {
+  EXPOSURE_BATCH_SIZE,
+  ShadowPass,
+  solveStepGrowth,
+  type MarchParams,
+  type MaskTarget,
+  type SunSample,
+} from './raymarch';
 import {
   boundsToRegion,
   chooseDemZoom,
@@ -61,6 +68,18 @@ export interface ShadowLayerState {
   /** Progression du calcul d'ensoleillement, entre 0 et 1. `null` hors de ce mode. */
   exposureProgress: number | null;
   maxExposureHours: number;
+  /** Progression d'un balayage horaire, entre 0 et 1. `null` quand aucun n'est en cours. */
+  sweepProgress: number | null;
+}
+
+export interface LngLatPoint {
+  lng: number;
+  lat: number;
+}
+
+/** `sunlit[instant][point]` : true au soleil, false à l'ombre, null hors du champ calculé. */
+export interface SweepResult {
+  sunlit: (boolean | null)[][];
 }
 
 export interface PointQuery {
@@ -97,8 +116,8 @@ export class ShadowLayer implements CustomLayerInterface {
   private overlayPrograms: ProjectionProgramCache | null = null;
 
   private demCache = new DemTileCache();
-  private buildingProvider: BuildingProvider;
-  private buildings: BuildingResult = { mesh: EMPTY_MESH, bounds: null, status: 'idle' };
+  private buildingProvider: ReturnType<typeof createBuildingProvider>;
+  private buildings: BuildingResult = { data: EMPTY_MESH, bounds: null, status: 'idle' };
 
   private date = new Date();
   private mode: 'shadow' | 'exposure' = 'shadow';
@@ -113,6 +132,14 @@ export class ShadowLayer implements CustomLayerInterface {
   private needsFieldRebuild = true;
   private needsMaskRender = true;
 
+  private sweep: {
+    dates: Date[];
+    points: LngLatPoint[];
+    cursor: number;
+    sunlit: (boolean | null)[][];
+    resolve: (result: SweepResult) => void;
+  } | null = null;
+
   private exposureSamples: SunSample[] = [];
   private exposureCursor = 0;
   private exposureDirty = true;
@@ -124,12 +151,13 @@ export class ShadowLayer implements CustomLayerInterface {
     buildings: 'idle',
     exposureProgress: null,
     maxExposureHours: 0,
+    sweepProgress: null,
   };
 
   constructor(private readonly options: ShadowLayerOptions) {
     this.shadowColor = options.shadowColor;
     this.opacity = options.opacity;
-    this.buildingProvider = new BuildingProvider((result) => {
+    this.buildingProvider = createBuildingProvider((result) => {
       this.buildings = result;
       this.needsFieldRebuild = true;
       this.exposureDirty = true;
@@ -198,6 +226,79 @@ export class ShadowLayer implements CustomLayerInterface {
     return { inShade: mask.shadow > 0.5, hasData: mask.hasData, elevation, sunMinutes: null };
   }
 
+  /**
+   * Interroge l'ombre en de nombreux points d'un coup.
+   *
+   * Passe par la copie CPU du masque : une seule synchronisation GPU, quel que soit le
+   * nombre de points. Les points hors du masque renvoient `null` plutôt qu'une valeur
+   * inventée — un point non calculé n'est pas un point au soleil.
+   */
+  queryPoints(points: readonly LngLatPoint[]): (boolean | null)[] {
+    if (!this.pass || !this.maskRegion || points.length === 0) {
+      return points.map(() => null);
+    }
+    return this.samplePoints(points);
+  }
+
+  /** Échantillonne un masque. La lecture groupée n'a lieu qu'une fois par rendu. */
+  private samplePoints(
+    points: readonly LngLatPoint[],
+    target: MaskTarget = 'main',
+  ): (boolean | null)[] {
+    const pass = this.pass as ShadowPass;
+    const region = this.maskRegion as MercatorRegion;
+    const buffer = pass.readMaskBuffer(target);
+    const size = pass.maskSize;
+    const width = regionWidth(region);
+    const height = region.y1 - region.y0;
+
+    return points.map((point) => {
+      const u = (lngToMercatorX(point.lng) - region.x0) / width;
+      const v = (latToMercatorY(point.lat) - region.y0) / height;
+      if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+
+      const x = Math.min(size - 1, Math.max(0, Math.floor(u * size)));
+      const y = Math.min(size - 1, Math.max(0, Math.floor(v * size)));
+      const offset = (y * size + x) * 4;
+      if ((buffer[offset + 1] ?? 0) <= 127) return null; // relief inconnu ici
+      return (buffer[offset] ?? 0) < 128;
+    });
+  }
+
+  /**
+   * Calcule l'ombre en chaque point, pour chaque instant demandé.
+   *
+   * Sert à la fois au « jusqu'à quand cette terrasse est-elle au soleil ? » et au profil
+   * d'ensoleillement d'une trace GPX — même mécanique, deux usages.
+   *
+   * Le champ de hauteur est reconstruit avec une marge omnidirectionnelle : sur une
+   * journée le soleil fait le tour, et la marge unidirectionnelle du mode normal
+   * laisserait passer les obstacles situés du côté opposé au soleil de départ.
+   */
+  sweepTimes(dates: readonly Date[], points: readonly LngLatPoint[]): Promise<SweepResult> {
+    if (dates.length === 0 || points.length === 0 || !this.map) {
+      return Promise.resolve({ sunlit: dates.map(() => points.map(() => null)) });
+    }
+
+    // Un balayage déjà en cours est abandonné : c'est le plus récent qui intéresse
+    // l'utilisateur (il vient de bouger le curseur d'heure de départ).
+    this.sweep?.resolve({ sunlit: [] });
+
+    return new Promise<SweepResult>((resolve) => {
+      this.sweep = {
+        dates: [...dates],
+        points: [...points],
+        cursor: 0,
+        sunlit: [],
+        resolve,
+      };
+      // La marge du champ doit changer de forme : on force la reconstruction.
+      this.needsFieldRebuild = true;
+      this.publishState({ sweepProgress: 0 });
+      this.map?.triggerRepaint();
+    });
+  }
+
   // --- Cycle de vie MapLibre ------------------------------------------------
 
   onAdd(map: MapLibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext): void {
@@ -261,8 +362,11 @@ export class ShadowLayer implements CustomLayerInterface {
       SUN_DIRECTION_TOLERANCE;
     const outsideField = !this.fieldRegion || !regionContains(this.fieldRegion, visible);
 
-    if (sunMoved || outsideField || this.needsFieldRebuild) {
-      this.recomputeRegions(visible, sun.altitude, texelDir);
+    // Pendant un balayage la direction du soleil change à chaque instant : la laisser
+    // déclencher une reconstruction du champ rendrait le calcul interminable.
+    const sweeping = this.sweep !== null;
+    if ((sunMoved && !sweeping) || outsideField || this.needsFieldRebuild) {
+      this.recomputeRegions(visible, sun.altitude, texelDir, sweeping);
       this.lastSunDir = texelDir;
       this.needsFieldRebuild = true;
     }
@@ -276,7 +380,7 @@ export class ShadowLayer implements CustomLayerInterface {
         region: this.fieldRegion,
         demZoom: this.demZoom,
         demCache: this.demCache,
-        buildings: this.buildings.mesh,
+        buildings: this.buildings.data,
       });
       this.needsFieldRebuild = false;
       this.needsMaskRender = true;
@@ -289,6 +393,11 @@ export class ShadowLayer implements CustomLayerInterface {
 
     if (!this.fieldRegion) return;
     this.marchParams = this.buildMarchParams(this.fieldRegion, visible, centerLat);
+
+    if (this.sweep) {
+      this.stepSweep(centerLat, centerLng);
+      return;
+    }
 
     if (this.mode === 'exposure') {
       this.stepExposure(centerLat, centerLng);
@@ -375,7 +484,12 @@ export class ShadowLayer implements CustomLayerInterface {
   }
 
   /** Détermine la région du champ de hauteur et le zoom des tuiles DEM à charger. */
-  private recomputeRegions(visible: MercatorRegion, sunAltitude: number, texelDir: [number, number]): void {
+  private recomputeRegions(
+    visible: MercatorRegion,
+    sunAltitude: number,
+    texelDir: [number, number],
+    omnidirectional: boolean,
+  ): void {
     const stats = this.field?.getStats();
     // Le dénivelé observé au tour précédent est le meilleur estimateur disponible de
     // la hauteur des obstacles susceptibles d'assombrir la vue.
@@ -387,6 +501,7 @@ export class ShadowLayer implements CustomLayerInterface {
       visible,
       sunDir: { east: texelDir[0], north: -texelDir[1] },
       sunAltitude,
+      omnidirectional,
       ...(relief !== undefined ? { reliefMeters: relief } : {}),
     });
 
@@ -444,6 +559,52 @@ export class ShadowLayer implements CustomLayerInterface {
       steps: RAY_STEPS,
       stepGrowth: solveStepGrowth(maxDistanceTexels, RAY_STEPS),
     };
+  }
+
+  /**
+   * Fait avancer le balayage horaire de quelques instants par frame.
+   *
+   * Chaque instant coûte un lancer de rayon plein écran plus une lecture du masque :
+   * tout enchaîner d'un bloc figerait l'onglet une à deux secondes.
+   */
+  private stepSweep(centerLat: number, centerLng: number): void {
+    const sweep = this.sweep;
+    const pass = this.pass;
+    const params = this.marchParams;
+    if (!sweep || !pass || !params) return;
+
+    const INSTANTS_PER_FRAME = 4;
+    const end = Math.min(sweep.cursor + INSTANTS_PER_FRAME, sweep.dates.length);
+    for (let i = sweep.cursor; i < end; i++) {
+      const date = sweep.dates[i] as Date;
+      const { altitude, azimuth } = sunPosition(date, centerLat, centerLng);
+      const dir = sunDirection(azimuth);
+      pass.renderShadow(
+        params,
+        {
+          dir: [dir.east, -dir.north],
+          tanAltitude: Math.tan(Math.max(altitude, MIN_USEFUL_ALTITUDE_RAD)),
+        },
+        !isDaylight(altitude),
+        'sweep',
+      );
+      sweep.sunlit.push(this.samplePoints(sweep.points, 'sweep'));
+    }
+    sweep.cursor = end;
+
+    if (sweep.cursor < sweep.dates.length) {
+      this.publishState({ sweepProgress: sweep.cursor / sweep.dates.length });
+      this.map?.triggerRepaint();
+      return;
+    }
+
+    this.sweep = null;
+    // Le masque affiché n'a pas bougé (le balayage a sa propre cible) ; seule la marge
+    // du champ doit revenir à sa forme orientée, moins grossière.
+    this.needsFieldRebuild = true;
+    this.publishState({ sweepProgress: null });
+    sweep.resolve({ sunlit: sweep.sunlit });
+    this.map?.triggerRepaint();
   }
 
   /**

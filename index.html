@@ -96,6 +96,50 @@
 
         <section class="sun-info" id="sun-info" aria-live="polite"></section>
 
+        <section class="feature" id="terraces-section">
+          <div class="row">
+            <span class="row-label">Terrasses au soleil</span>
+            <div class="segmented" role="radiogroup" aria-label="Afficher les terrasses">
+              <button type="button" id="terraces-off" role="radio" aria-checked="true">Masquées</button>
+              <button type="button" id="terraces-on" role="radio" aria-checked="false">Affichées</button>
+            </div>
+          </div>
+          <p class="feature-summary" id="terraces-summary"></p>
+          <button type="button" id="terraces-sweep" disabled>Jusqu’à quand&nbsp;?</button>
+          <ul class="terrace-list" id="terraces-list"></ul>
+        </section>
+
+        <section class="feature" id="track-section">
+          <div class="row">
+            <span class="row-label">Parcours GPX</span>
+            <div class="buttons">
+              <label class="file-button" for="track-file">Ouvrir un GPX</label>
+              <input type="file" id="track-file" accept=".gpx,application/gpx+xml" />
+              <button type="button" id="track-clear">Retirer</button>
+            </div>
+          </div>
+
+          <p class="feature-summary" id="track-message" hidden></p>
+
+          <div class="track-controls">
+            <div class="row">
+              <label for="track-departure">Départ</label>
+              <input type="time" id="track-departure" step="300" />
+            </div>
+            <div class="row">
+              <label for="track-speed">Vitesse <output id="track-speed-output">4 km/h</output></label>
+              <input type="range" id="track-speed" min="2" max="25" step="0.5" value="4" />
+            </div>
+          </div>
+
+          <div class="profile-host" id="track-profile"></div>
+          <div class="profile-legend" id="track-legend" aria-hidden="false">
+            <span><i class="swatch swatch-sun"></i>Au soleil</span>
+            <span><i class="swatch swatch-shade"></i>À l’ombre</span>
+          </div>
+          <div class="sun-info" id="track-stats"></div>
+        </section>
+
         <section class="legend" id="legend" hidden>
           <span class="legend-title">Heures de soleil</span>
           <div class="legend-ramp" aria-hidden="true"></div>
