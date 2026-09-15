@@ -177,12 +177,14 @@ export function chooseDemZoom(
   region: MercatorRegion,
   fieldSize: number,
   maxTiles = MAX_DEM_TILES,
+  /** Plafond de la source d'élévation : terrarium s'arrête bien avant le LiDAR. */
+  maxZoom = TERRARIUM_MAX_ZOOM,
 ): number {
   const unitsPerTexel = Math.max(regionWidth(region), regionHeight(region)) / fieldSize;
   // Un texel de tuile au zoom z couvre 1 / (tileSize * 2^z) unités Mercator.
   const idealZoom = Math.log2(1 / (unitsPerTexel * TERRARIUM_TILE_SIZE));
 
-  let zoom = Math.max(0, Math.min(TERRARIUM_MAX_ZOOM, Math.round(idealZoom)));
+  let zoom = Math.max(0, Math.min(maxZoom, Math.round(idealZoom)));
   while (zoom > 0 && tileCountAtZoom(region, zoom) > maxTiles) zoom--;
   return zoom;
 }

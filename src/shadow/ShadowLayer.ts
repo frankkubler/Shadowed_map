@@ -17,6 +17,7 @@ import {
 } from '../sun/mercator';
 import { isDaylight, sunDirection, sunPosition, MIN_USEFUL_ALTITUDE_RAD } from '../sun/sun';
 import { createBuildingProvider, EMPTY_MESH, MIN_BUILDING_ZOOM, type BuildingResult } from './buildings';
+import type { DemKind } from './demTiles';
 import { DemTileCache } from './demTiles';
 import { createUnitQuad, detectCapabilities } from './glUtils';
 import { ProjectionProgramCache, setProjectionUniforms } from './projection';
@@ -130,6 +131,8 @@ export class ShadowLayer implements CustomLayerInterface {
   private demZoom = 12;
   private lastSunDir: [number, number] = [0, 0];
   private needsFieldRebuild = true;
+  /** Nature de la dernière tuile obtenue : décide du zoom exploitable. */
+  private demKind: DemKind | null = null;
   private needsMaskRender = true;
 
   private sweep: {
@@ -506,7 +509,14 @@ export class ShadowLayer implements CustomLayerInterface {
     });
 
     this.fieldRegion = squareRegion(region);
-    this.demZoom = chooseDemZoom(this.fieldRegion, FIELD_SIZE);
+    // Le plafond dépend de ce que la dernière tuile a révélé : là où le LiDAR répond,
+    // on peut descendre bien plus fin que les 3 mètres de terrarium.
+    this.demZoom = chooseDemZoom(
+      this.fieldRegion,
+      FIELD_SIZE,
+      undefined,
+      this.demCache.maxZoomAt(this.demKind),
+    );
   }
 
   /** Lance le chargement des tuiles manquantes. Renvoie `true` si tout est déjà là. */
@@ -528,6 +538,9 @@ export class ShadowLayer implements CustomLayerInterface {
         complete = false;
         void this.demCache.load({ x: wrapped, y, z: this.demZoom }).then((tile) => {
           if (!tile) return;
+          // La nature de la source ne se connaît qu'une fois une tuile obtenue : la
+          // première sert de sonde, les suivantes pourront être demandées plus fines.
+          this.demKind = tile.kind;
           this.needsFieldRebuild = true;
           this.map?.triggerRepaint();
         });

@@ -15,6 +15,7 @@
  */
 import { latToMercatorY, lngToMercatorX, type TileCoord } from '../sun/mercator';
 import { decodePngRgb8 } from './png';
+import { fetchLidarTile, IGN_MAX_ZOOM, IGN_TILE_SIZE } from './lidarIgn';
 
 export const TERRARIUM_TILE_SIZE = 256;
 export const TERRARIUM_MAX_ZOOM = 15;
@@ -24,6 +25,13 @@ export const TERRARIUM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terr
 /** Valeur rendue quand aucune donnée n'est disponible : plus basse que tout terrain réel. */
 export const NO_DATA_ELEVATION = -10000;
 
+/**
+ * Nature de la tuile. `surface` signifie que le sursol — toits, arbres — est déjà dans
+ * les altitudes : il ne faut alors surtout pas y extruder les bâtiments d'OpenStreetMap,
+ * ils seraient comptés deux fois.
+ */
+export type DemKind = 'terrain' | 'surface';
+
 export interface DemTile {
   coord: TileCoord;
   size: number;
@@ -31,6 +39,7 @@ export interface DemTile {
   elevations: Float32Array;
   minElevation: number;
   maxElevation: number;
+  kind: DemKind;
 }
 
 function tileKey(z: number, x: number, y: number): string {
@@ -92,7 +101,17 @@ export class DemTileCache {
   constructor(
     private readonly maxTiles = 256,
     private readonly baseUrl = TERRARIUM_URL,
+    /**
+     * Le LiDAR HD de l'IGN est essayé en premier là où il existe : il est six fois plus
+     * fin que terrarium et porte le sursol. Désactivable pour le banc de vérification.
+     */
+    private readonly useLidar = true,
   ) {}
+
+  /** Zoom maximal exploitable ici : celui du LiDAR s'il couvre, celui de terrarium sinon. */
+  maxZoomAt(kind: DemKind | null): number {
+    return kind === 'surface' ? IGN_MAX_ZOOM : TERRARIUM_MAX_ZOOM;
+  }
 
   get(z: number, x: number, y: number): DemTile | undefined {
     const key = tileKey(z, x, y);
@@ -135,6 +154,14 @@ export class DemTileCache {
   }
 
   private async fetchTile(coord: TileCoord, signal?: AbortSignal): Promise<DemTile | null> {
+    if (this.useLidar && coord.z <= IGN_MAX_ZOOM) {
+      const lidar = await fetchLidarTile(coord, signal).catch(() => null);
+      if (lidar) return this.buildTile(coord, IGN_TILE_SIZE, lidar, 'surface');
+    }
+    // Terrarium ne va pas au-delà de son zoom natif : au-dessus, mieux vaut pas de
+    // tuile du tout qu'une tuile étirée qui contredirait ses voisines.
+    if (coord.z > TERRARIUM_MAX_ZOOM) return null;
+
     const url = `${this.baseUrl}/${coord.z}/${coord.x}/${coord.y}.png`;
     const response = await fetch(url, { signal, mode: 'cors' });
     if (!response.ok) return null;
@@ -144,27 +171,32 @@ export class DemTileCache {
     const donnees = await response.arrayBuffer();
     const png = await decodePngRgb8(donnees);
 
-    let size: number;
-    let elevations: DemTile['elevations'];
     if (png) {
-      size = png.width;
-      elevations = decodeTerrarium(png.rgb, size, 3);
-    } else {
-      const bitmap = await createImageBitmap(new Blob([donnees]));
-      size = bitmap.width;
-      const ctx = getDecodeContext(size);
-      ctx.clearRect(0, 0, size, size);
-      ctx.drawImage(bitmap, 0, 0);
-      bitmap.close();
-      elevations = decodeTerrarium(ctx.getImageData(0, 0, size, size).data, size, 4);
+      return this.buildTile(coord, png.width, decodeTerrarium(png.rgb, png.width, 3), 'terrain');
     }
+    const bitmap = await createImageBitmap(new Blob([donnees]));
+    const size = bitmap.width;
+    const ctx = getDecodeContext(size);
+    ctx.clearRect(0, 0, size, size);
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const elevations = decodeTerrarium(ctx.getImageData(0, 0, size, size).data, size, 4);
+    return this.buildTile(coord, size, elevations, 'terrain');
+  }
+
+  private buildTile(
+    coord: TileCoord,
+    size: number,
+    elevations: Float32Array,
+    kind: DemKind,
+  ): DemTile {
     let min = Infinity;
     let max = -Infinity;
     for (const v of elevations) {
       if (v < min) min = v;
       if (v > max) max = v;
     }
-    return { coord, size, elevations, minElevation: min, maxElevation: max };
+    return { coord, size, elevations, minElevation: min, maxElevation: max, kind };
   }
 
   private insert(key: string, tile: DemTile): void {
@@ -181,6 +213,20 @@ export class DemTileCache {
    * Renvoie `null` si la tuile n'est pas en cache — l'appelant décide alors s'il
    * attend ou s'il se contente d'une valeur approchée.
    */
+  /**
+   * Nature de la donnée sous ce point, ou `null` si la tuile n'est pas chargée.
+   * Sert à savoir si les bâtiments y sont déjà présents.
+   */
+  kindAt(lng: number, lat: number, z: number): DemKind | null {
+    const scale = Math.pow(2, z);
+    const tile = this.get(
+      z,
+      Math.floor(lngToMercatorX(lng) * scale),
+      Math.floor(latToMercatorY(lat) * scale),
+    );
+    return tile?.kind ?? null;
+  }
+
   elevationAt(lng: number, lat: number, z: number): number | null {
     const scale = Math.pow(2, z);
     const gx = lngToMercatorX(lng) * scale;

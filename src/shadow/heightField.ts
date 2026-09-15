@@ -213,6 +213,10 @@ export class HeightField {
     // L'arrivée de la tuile manquante déclenche de toute façon une reconstruction du
     // champ, qui replacera le bâtiment.
     const roofs = visible.flatMap((anchor) => {
+      // Là où l'élévation vient d'un modèle de surface — le LiDAR HD —, le toit est
+      // déjà dans la donnée, avec sa forme réelle. L'extruder depuis OpenStreetMap
+      // poserait le bâtiment sur son propre toit, et doublerait sa hauteur.
+      if (demCache.kindAt(anchor.lng, anchor.lat, demZoom) === 'surface') return [];
       const ground = demCache.elevationAt(anchor.lng, anchor.lat, demZoom);
       return ground === null ? [] : [{ anchor, roof: ground + anchor.height }];
     });
