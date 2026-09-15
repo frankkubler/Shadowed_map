@@ -5,12 +5,16 @@ date et heure. Inspiré de [ShadeMap](https://shademap.app), avec un angle plein
 où est le soleil à 18 h, quelles terrasses sont encore éclairées, combien d'heures de
 soleil tombent ici aujourd'hui.
 
-Tout est calculé dans le navigateur, sans clé d'API et sans serveur.
+Tout est calculé dans le navigateur, sans serveur. Seuls les fonds de carte CARTO
+demandent une clé, gratuite (voir « Sources de données »).
 
 ## Ce que ça fait
 
 - **Ombres du relief et des bâtiments** à l'instant choisi, recalculées en temps réel.
-- **Curseur horaire** et animation de la journée.
+  En France, le relief vient du LiDAR HD de l'IGN, au pas de 50 cm ; la végétation peut
+  être incluse, au choix.
+- **Curseur horaire** et animation de la journée, à vitesse réglable. Sans instant
+  demandé dans le lien, la carte suit l'heure courante.
 - **Heures d'ensoleillement** cumulées sur la journée, en carte colorée.
 - **Terrasses au soleil** : cafés, bars et restaurants d'OpenStreetMap, colorés selon
   qu'ils sont éclairés ou non, avec une liste triée et, à la demande, jusqu'à quelle
@@ -30,10 +34,15 @@ texture où chaque texel porte l'altitude du sommet de ce qui s'y trouve — pui
 **unique lancer de rayon** vers le soleil détermine l'ombre.
 
 ```
-   tuiles DEM terrarium (AWS)  ─┐
-                                ├─►  champ de hauteur   ─►  lancer de rayon  ─►  masque d'ombre
-   empreintes bâtiments OSM  ───┘     (viewport + marge)     vers le soleil       sur la carte
+   LiDAR HD IGN (France)  ─┐
+   ou tuiles terrarium     ├─►  champ de hauteur   ─►  lancer de rayon  ─►  masque d'ombre
+   empreintes bâtiments OSM┘     (viewport + marge)     vers le soleil       sur la carte
 ```
+
+Les bâtiments d'OpenStreetMap ne sont extrudés que si l'élévation est un modèle de
+terrain nu. Là où elle vient du modèle de surface LiDAR, les toits sont déjà dans la
+donnée, avec leur forme réelle : les extruder par-dessus poserait chaque bâtiment sur
+son propre toit.
 
 Traiter relief et bâtiments séparément donnerait de mauvais résultats là où un immeuble
 se trouve à l'ombre d'une montagne ; les fusionner règle le cas sans code particulier.
@@ -47,8 +56,13 @@ Quelques points sensibles, détaillés dans les commentaires du code :
   coucher.
 - Le pas de marche **croît géométriquement** : fin près du point de départ pour attraper
   les ombres de bâtiments, grossier au loin pour les crêtes (`src/shadow/raymarch.ts`).
-- Le nombre de tuiles d'élévation par vue est **plafonné** : les données sous-jacentes
-  (SRTM 30 m, EU-DEM 25 m) ne justifient pas les zooms les plus fins.
+- Le zoom d'élévation exploitable dépend de la **source** : terrarium dérive de données
+  à 25–30 m et s'arrête tôt, le LiDAR descend à 50 cm. Le nombre de tuiles par vue
+  reste **plafonné**, ce qui borne les requêtes quelle que soit la source.
+- Les tuiles d'élévation sont **décodées sans passer par le canvas**
+  (`src/shadow/png.ts`) : `createImageBitmap` + `drawImage` + `getImageData` n'est pas
+  fidèle à l'octet près, et une unité du canal rouge vaut 256 mètres. Mesuré : 78 pixels
+  faux sur une seule tuile, donc 78 pics de 256 m et autant de fausses ombres.
 - L'affichage passe par **`projectTile()`**, la fonction de projection que MapLibre
   injecte dans le shader, et non par une matrice brute — c'est ce qui garde la couche
   correcte si la carte passe en projection globe (`src/shadow/projection.ts`).
@@ -79,12 +93,20 @@ seul et signalée comme telle. Les établissements qui déclarent `outdoor_seati
 
 ## Précision — à lire avant de s'y fier
 
-Les résultats sont des **estimations**, sensiblement moins précises que ShadeMap :
+Les résultats sont des **estimations**, et leur qualité dépend beaucoup de l'endroit.
 
-- Le relief vient d'un modèle de terrain nu à 25–30 m de résolution réelle.
-- Les hauteurs de bâtiments viennent d'OpenStreetMap ; elles sont souvent absentes, et
-  alors déduites du nombre de niveaux ou remplacées par une valeur par défaut de 8 m.
-- **La végétation n'est pas modélisée** : un arbre ne projette aucune ombre ici.
+**En France**, l'élévation vient du LiDAR HD de l'IGN, mesuré au pas de 50 cm. Deux
+modes, au choix dans le panneau :
+
+- *Bâtiments* — le sol nu mesuré, les bâtiments extrudés depuis OpenStreetMap. Valable
+  toute l'année. Les hauteurs OSM sont souvent absentes, et alors déduites du nombre de
+  niveaux ou remplacées par une valeur par défaut de 8 m.
+- *Bâtiments et arbres* — la surface telle qu'elle a été relevée, toits et végétation
+  compris. Plus exact au jour du vol, mais **le feuillage est celui de ce jour-là** :
+  un tilleul dénudé en janvier projette ici l'ombre de son feuillage d'été.
+
+**Ailleurs**, le relief vient d'un modèle de terrain nu à 25–30 m de résolution réelle,
+et la végétation n'est pas modélisée du tout.
 
 Utile pour choisir une terrasse ou préparer une photo. À ne pas utiliser pour du
 dimensionnement de panneaux solaires ou une étude d'ensoleillement réglementaire.
@@ -96,6 +118,15 @@ npm install
 npm run dev        # http://localhost:5173
 npm run build
 ```
+
+Les fonds CARTO attendent leur clé dans un fichier `.env` à la racine, ignoré par git :
+
+```
+CARTO_BASEMAPS_API_KEY=…
+```
+
+Sans elle, la carte fonctionne mais les fonds clair et sombre reviennent barrés d'un
+filigrane. Pour le site publié, la même clé se pose en secret de dépôt, sous le même nom.
 
 | Commande | Rôle |
 |---|---|
@@ -136,10 +167,11 @@ serveur ou héberger ses propres instances.
 
 | Donnée | Source | Licence / conditions |
 |---|---|---|
-| Élévation | [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (terrarium) | domaine public / sources multiples |
+| Élévation (France) | [LiDAR HD](https://geoservices.ign.fr/lidarhd) de l'IGN, via le WMS de la [Géoplateforme](https://data.geopf.fr) | [Etalab 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/), sans clé |
+| Élévation (ailleurs) | [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (terrarium) | domaine public / sources multiples |
 | Bâtiments | [OpenStreetMap](https://www.openstreetmap.org/copyright) via [Overpass API](https://overpass-api.de) | ODbL |
 | Recherche de lieux | [Nominatim](https://nominatim.org/release-docs/latest/api/Overview/) | ODbL, [politique d'usage](https://operations.osmfoundation.org/policies/nominatim/) |
-| Fonds de carte | [CARTO](https://carto.com/attributions), [OpenStreetMap](https://www.openstreetmap.org/copyright) | attribution requise |
+| Fonds de carte | [CARTO](https://carto.com/attributions), [OpenStreetMap](https://www.openstreetmap.org/copyright) | attribution requise ; CARTO exige une [clé](https://carto.com/basemaps/apikey), gratuite jusqu'à 5 M tuiles/mois |
 | Terrasses | [OpenStreetMap](https://www.openstreetmap.org/copyright) via Overpass | ODbL |
 | Rendu | [MapLibre GL JS](https://maplibre.org/) | BSD-3-Clause |
 | Position du soleil | [SunCalc](https://github.com/mourner/suncalc) | BSD-2-Clause |

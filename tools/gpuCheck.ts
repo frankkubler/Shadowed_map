@@ -283,7 +283,9 @@ export async function runTerrainChecks(canvas: HTMLCanvasElement): Promise<Check
   // Un miroir local peut être fourni via ?dem=… : c'est ce qui permet de faire tourner
   // ce banc derrière un réseau restreint, avec un jeu de tuiles téléchargé à l'avance.
   const demBase = new URLSearchParams(location.search).get('dem') ?? undefined;
-  const cache = demBase ? new DemTileCache(256, demBase) : new DemTileCache();
+  // Le LiDAR est écarté ici : ce banc compare des altitudes attendues sur un relief
+  // connu, il lui faut la même source d'un jour à l'autre, et une seule.
+  const cache = new DemTileCache(256, demBase ?? undefined, false);
   const bounds = regionToBounds(fieldRegion);
   const scale = Math.pow(2, demZoom);
   const minX = Math.floor(lngToMercatorX(bounds.west) * scale);
