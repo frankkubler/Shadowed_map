@@ -79,9 +79,14 @@ export function decodeBil32(buffer: ArrayBuffer, size = IGN_TILE_SIZE): Float32A
 }
 
 /**
- * Charge une tuile d'élévation LiDAR. Renvoie `null` hors couverture, sur refus du
- * service, ou si la réponse n'a pas la forme attendue — l'appelant retombe alors sur
- * terrarium.
+ * Charge une tuile d'élévation LiDAR.
+ *
+ * Renvoie `null` quand la zone n'est pas couverte : c'est un fait durable, l'appelant
+ * peut se rabattre sur terrarium une fois pour toutes. En revanche un refus du service
+ * **lève**, et c'est délibéré : mesuré, une requête sur huit environ repart en 400 sans
+ * raison apparente. Confondre ce hasard avec une absence de données ferait renoncer
+ * définitivement à une tuile qui existe — et laisserait un trou dans le champ aux zooms
+ * où terrarium ne peut pas prendre le relais.
  */
 export async function fetchLidarTile(
   coord: TileCoord,
@@ -90,11 +95,15 @@ export async function fetchLidarTile(
   if (coord.z > IGN_MAX_ZOOM) return null;
 
   const response = await fetch(lidarTileUrl(coord), { signal, mode: 'cors' });
-  if (!response.ok) return null;
+  if (!response.ok) {
+    throw new Error(`LiDAR IGN : réponse ${response.status}`);
+  }
 
-  // Le service signale ses erreurs en XML, avec un code 200.
+  // Le service signale certaines erreurs en XML, avec un code 200.
   const type = response.headers.get('Content-Type') ?? '';
-  if (!type.includes('bil')) return null;
+  if (!type.includes('bil')) {
+    throw new Error(`LiDAR IGN : réponse inattendue (${type})`);
+  }
 
   return decodeBil32(await response.arrayBuffer());
 }

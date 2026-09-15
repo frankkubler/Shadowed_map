@@ -78,6 +78,32 @@ describe('source d’élévation', () => {
     expect(appels.some((u) => u.includes('geopf'))).toBe(false);
   });
 
+  // Un 400 sporadique du service (mesuré : environ une requête sur huit) ne doit pas
+  // faire classer la tuile comme absente là où terrarium ne peut pas prendre le relais,
+  // sinon le trou serait définitif.
+  it('laisse remonter un refus au-delà du zoom de terrarium', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<ServiceException/>', { status: 400 })),
+    );
+
+    const cache = new DemTileCache();
+    const coord = { z: 17, x: 68037, y: 46670 };
+    expect(await cache.load(coord)).toBeNull();
+
+    // la tuile n'est pas mise sur liste noire : un nouvel essai repart bien en requête
+    const appels: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        appels.push(url);
+        return reponseBil(1050);
+      }),
+    );
+    expect((await cache.load(coord))?.kind).toBe('surface');
+    expect(appels).not.toHaveLength(0);
+  });
+
   // Terrarium s'arrête au zoom 15 : au-delà, mieux vaut pas de tuile qu'une tuile étirée.
   it('ne rend rien au-delà du zoom de terrarium quand le LiDAR ne répond pas', async () => {
     vi.stubGlobal(

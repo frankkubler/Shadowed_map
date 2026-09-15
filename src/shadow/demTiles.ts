@@ -155,7 +155,13 @@ export class DemTileCache {
 
   private async fetchTile(coord: TileCoord, signal?: AbortSignal): Promise<DemTile | null> {
     if (this.useLidar && coord.z <= IGN_MAX_ZOOM) {
-      const lidar = await fetchLidarTile(coord, signal).catch(() => null);
+      // Un refus du service est transitoire : on ne l'absorbe que si terrarium peut
+      // prendre le relais. Sinon on laisse remonter, pour que la tuile soit redemandée
+      // au lieu d'être classée absente à tort.
+      const secours = coord.z <= TERRARIUM_MAX_ZOOM;
+      const lidar = secours
+        ? await fetchLidarTile(coord, signal).catch(() => null)
+        : await fetchLidarTile(coord, signal);
       if (lidar) return this.buildTile(coord, IGN_TILE_SIZE, lidar, 'surface');
     }
     // Terrarium ne va pas au-delà de son zoom natif : au-dessus, mieux vaut pas de
