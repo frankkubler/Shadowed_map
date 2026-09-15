@@ -26,6 +26,36 @@ const OVERPASS_ENDPOINTS = [
  */
 let preferredEndpoint = 0;
 
+/**
+ * Miroirs mis à l'écart après un refus, et l'instant à partir duquel on les réessaiera.
+ *
+ * Sans cela, un miroir qui répond 429 était resollicité au déplacement suivant, soit
+ * toutes les 800 ms pendant un zoom : exactement la façon de se faire bloquer plus
+ * durablement. Overpass indique lui-même le délai à respecter dans `Retry-After`.
+ */
+const cooldowns = new Map<string, number>();
+
+/** Délai retenu quand le serveur ne dit rien. */
+const DEFAULT_COOLDOWN_MS = 60_000;
+const MAX_COOLDOWN_MS = 10 * 60_000;
+
+function cooldownMs(response: Response): number {
+  const retryAfter = response.headers.get('Retry-After');
+  if (retryAfter) {
+    const secondes = Number(retryAfter);
+    if (Number.isFinite(secondes) && secondes > 0) {
+      return Math.min(secondes * 1000, MAX_COOLDOWN_MS);
+    }
+  }
+  return DEFAULT_COOLDOWN_MS;
+}
+
+/** Remet à zéro préférence et mises à l'écart. Réservé aux tests. */
+export function resetOverpassState(): void {
+  preferredEndpoint = 0;
+  cooldowns.clear();
+}
+
 export interface OverpassGeometryPoint {
   lat: number;
   lon: number;
@@ -55,10 +85,17 @@ export async function runOverpassQuery(
   query: string,
   signal: AbortSignal,
 ): Promise<OverpassElement[]> {
+  const maintenant = Date.now();
+  let tousEnAttente = true;
+
   for (let attempt = 0; attempt < OVERPASS_ENDPOINTS.length; attempt++) {
     const index = (preferredEndpoint + attempt) % OVERPASS_ENDPOINTS.length;
     const endpoint = OVERPASS_ENDPOINTS[index];
     if (!endpoint) continue;
+
+    const reprise = cooldowns.get(endpoint);
+    if (reprise !== undefined && reprise > maintenant) continue;
+    tousEnAttente = false;
 
     try {
       const response = await fetch(endpoint, {
@@ -67,9 +104,17 @@ export async function runOverpassQuery(
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         signal,
       });
-      if (!response.ok) continue;
+      if (!response.ok) {
+        // 429 : quota dépassé. 504 : la file du serveur est pleine. Dans les deux cas
+        // insister ne fait qu'aggraver les choses.
+        if (response.status === 429 || response.status === 504) {
+          cooldowns.set(endpoint, Date.now() + cooldownMs(response));
+        }
+        continue;
+      }
 
       const json = (await response.json()) as { elements?: OverpassElement[] };
+      cooldowns.delete(endpoint);
       preferredEndpoint = index;
       return json.elements ?? [];
     } catch (error) {
@@ -77,7 +122,11 @@ export async function runOverpassQuery(
       // Miroir suivant.
     }
   }
-  throw new Error("Aucun miroir Overpass n'a répondu.");
+  throw new Error(
+    tousEnAttente
+      ? 'Tous les miroirs Overpass sont temporairement hors de portée.'
+      : "Aucun miroir Overpass n'a répondu.",
+  );
 }
 
 export type ProviderStatus = 'idle' | 'loading' | 'ready' | 'error' | 'zoomed-out' | 'disabled';
