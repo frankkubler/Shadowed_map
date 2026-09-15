@@ -84,6 +84,22 @@
           </div>
 
           <div class="row">
+            <span class="row-label">Ombres portées par</span>
+            <div class="segmented" role="radiogroup" aria-label="Source des ombres">
+              <button type="button" data-relief="mnt" role="radio" aria-checked="true">
+                Bâtiments
+              </button>
+              <button type="button" data-relief="mns" role="radio" aria-checked="false">
+                Bâtiments et arbres
+              </button>
+            </div>
+            <p class="hint" id="relief-hint">
+              Les arbres viennent du relevé LiDAR : leur feuillage est celui du jour du
+              vol, trompeur en hiver. Disponible en France seulement.
+            </p>
+          </div>
+
+          <div class="row">
             <span class="row-label">Affichage</span>
             <div class="segmented" role="radiogroup" aria-label="Mode d'affichage">
               <button type="button" data-mode="shadow" role="radio" aria-checked="true">Ombre</button>

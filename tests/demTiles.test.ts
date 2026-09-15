@@ -29,7 +29,7 @@ describe('source d’élévation', () => {
     );
 
     const tuile = await new DemTileCache().load(COORD);
-    expect(tuile?.kind).toBe('surface');
+    expect(tuile?.source).toBe('lidar');
     expect(tuile?.minElevation).toBeCloseTo(1050, 3);
   });
 
@@ -46,7 +46,7 @@ describe('source d’élévation', () => {
     );
 
     const tuile = await new DemTileCache().load(COORD);
-    expect(tuile?.kind).toBe('terrain');
+    expect(tuile?.source).toBe('terrarium');
     expect(Math.round(tuile!.minElevation)).toBe(1033);
     expect(appels.some((u) => u.includes('geopf'))).toBe(true);
     expect(appels.some((u) => u.includes('elevation-tiles-prod'))).toBe(true);
@@ -60,7 +60,7 @@ describe('source d’élévation', () => {
       ),
     );
 
-    expect((await new DemTileCache().load(COORD))?.kind).toBe('terrain');
+    expect((await new DemTileCache().load(COORD))?.source).toBe('terrarium');
   });
 
   it('n’interroge pas le LiDAR quand il est désactivé', async () => {
@@ -74,7 +74,7 @@ describe('source d’élévation', () => {
     );
 
     const cache = new DemTileCache(256, undefined, false);
-    expect((await cache.load(COORD))?.kind).toBe('terrain');
+    expect((await cache.load(COORD))?.source).toBe('terrarium');
     expect(appels.some((u) => u.includes('geopf'))).toBe(false);
   });
 
@@ -100,7 +100,7 @@ describe('source d’élévation', () => {
         return reponseBil(1050);
       }),
     );
-    expect((await cache.load(coord))?.kind).toBe('surface');
+    expect((await cache.load(coord))?.source).toBe('lidar');
     expect(appels).not.toHaveLength(0);
   });
 
@@ -116,7 +116,65 @@ describe('source d’élévation', () => {
 
   it('annonce le zoom exploitable selon la source', () => {
     const cache = new DemTileCache();
-    expect(cache.maxZoomAt('surface')).toBeGreaterThan(cache.maxZoomAt('terrain'));
-    expect(cache.maxZoomAt(null)).toBe(cache.maxZoomAt('terrain'));
+    expect(cache.maxZoomAt('lidar')).toBeGreaterThan(cache.maxZoomAt('terrarium'));
+    expect(cache.maxZoomAt(null)).toBe(cache.maxZoomAt('terrarium'));
+  });
+
+  // Le sol nu est le défaut : les bâtiments restent extrudés depuis OpenStreetMap, ce
+  // qui reste vrai toute l'année, là où le feuillage du MNS est celui du jour du vol.
+  it('demande le sol nu par défaut, et la surface sur demande', async () => {
+    const couches: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('geopf')) couches.push(new URL(url).searchParams.get('LAYERS') ?? '');
+        return reponseBil(1050);
+      }),
+    );
+
+    const cache = new DemTileCache();
+    expect(cache.lidarProduct).toBe('mnt');
+    expect((await cache.load(COORD))?.kind).toBe('terrain');
+    expect(couches[0]).toContain('_MNT_');
+
+    cache.setLidarProduct('mns');
+    expect((await cache.load(COORD))?.kind).toBe('surface');
+    expect(couches[1]).toContain('_MNS_');
+  });
+
+  // Une requête partie avant la bascule ne doit pas repeupler le cache avec les
+  // altitudes de l'ancien produit.
+  it('ignore une réponse arrivée après un changement de produit', async () => {
+    let debloquer: (() => void) | undefined;
+    const attente = new Promise<void>((resolve) => {
+      debloquer = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await attente;
+        return reponseBil(1050);
+      }),
+    );
+
+    const cache = new DemTileCache();
+    const enVol = cache.load(COORD);
+    cache.setLidarProduct('mns');
+    debloquer?.();
+
+    expect(await enVol).toBeNull();
+    expect(cache.get(COORD.z, COORD.x, COORD.y)).toBeUndefined();
+  });
+
+  it('jette le cache en changeant de produit, les altitudes n’étant plus les mêmes', async () => {
+    let altitude = 1050;
+    vi.stubGlobal('fetch', vi.fn(async () => reponseBil(altitude)));
+
+    const cache = new DemTileCache();
+    expect((await cache.load(COORD))?.minElevation).toBeCloseTo(1050, 3);
+
+    altitude = 1062;
+    cache.setLidarProduct('mns');
+    expect((await cache.load(COORD))?.minElevation).toBeCloseTo(1062, 3);
   });
 });

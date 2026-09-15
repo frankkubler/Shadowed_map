@@ -42,12 +42,14 @@ describe('tuiles LiDAR IGN', () => {
   });
 
   it('demande le bon format et la bonne projection', () => {
-    const url = new URL(lidarTileUrl({ z: 15, x: 17009, y: 11667 }));
+    const url = new URL(lidarTileUrl({ z: 15, x: 17009, y: 11667 }, 'mns'));
     const p = url.searchParams;
     expect(p.get('FORMAT')).toBe('image/x-bil;bits=32');
     expect(p.get('CRS')).toBe('EPSG:3857');
     expect(p.get('WIDTH')).toBe('256');
     expect(p.get('LAYERS')).toContain('MNS');
+    expect(new URL(lidarTileUrl({ z: 15, x: 17009, y: 11667 }, 'mnt')).searchParams.get('LAYERS'))
+      .toContain('MNT');
     expect(p.get('BBOX')?.split(',')).toHaveLength(4);
   });
 

@@ -293,6 +293,18 @@ export class HeightField {
     return texture;
   }
 
+  /**
+   * Jette les textures de tuiles déjà téléversées.
+   *
+   * Elles sont indexées par coordonnée de tuile seulement : changer de source
+   * d'élévation ne change pas ces coordonnées, et sans cette purge le champ continuerait
+   * d'être dessiné avec les altitudes précédentes.
+   */
+  clearTiles(): void {
+    for (const texture of this.gpuTiles.values()) this.gl.deleteTexture(texture);
+    this.gpuTiles.clear();
+  }
+
   dispose(): void {
     deleteRenderTarget(this.gl, this.target);
     this.gl.deleteProgram(this.demProgram);

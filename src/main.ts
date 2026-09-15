@@ -327,6 +327,24 @@ function main(): void {
     animationFrame = requestAnimationFrame(tick);
   });
 
+  // --- Source des ombres ----------------------------------------------------
+
+  // Le sol nu est le défaut : les bâtiments viennent alors d'OpenStreetMap, ce qui reste
+  // vrai toute l'année. Le modèle de surface est plus exact mais fige la végétation au
+  // jour du relevé, et n'existe qu'en France.
+  const reliefButtons = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('[data-relief]'),
+  );
+  for (const button of reliefButtons) {
+    button.addEventListener('click', () => {
+      const produit = button.dataset['relief'] === 'mns' ? 'mns' : 'mnt';
+      for (const other of reliefButtons) {
+        other.setAttribute('aria-checked', String(other === button));
+      }
+      shadowLayer.setLidarProduct(produit);
+    });
+  }
+
   // --- Mode d'affichage -----------------------------------------------------
 
   const modeButtons = Array.from(

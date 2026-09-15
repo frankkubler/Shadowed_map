@@ -17,7 +17,8 @@ import {
 } from '../sun/mercator';
 import { isDaylight, sunDirection, sunPosition, MIN_USEFUL_ALTITUDE_RAD } from '../sun/sun';
 import { createBuildingProvider, EMPTY_MESH, MIN_BUILDING_ZOOM, type BuildingResult } from './buildings';
-import type { DemKind } from './demTiles';
+import type { DemSource } from './demTiles';
+import type { LidarProduct } from './lidarIgn';
 import { DemTileCache } from './demTiles';
 import { createUnitQuad, detectCapabilities } from './glUtils';
 import { ProjectionProgramCache, setProjectionUniforms } from './projection';
@@ -131,8 +132,8 @@ export class ShadowLayer implements CustomLayerInterface {
   private demZoom = 12;
   private lastSunDir: [number, number] = [0, 0];
   private needsFieldRebuild = true;
-  /** Nature de la dernière tuile obtenue : décide du zoom exploitable. */
-  private demKind: DemKind | null = null;
+  /** Source de la dernière tuile obtenue : décide du zoom exploitable. */
+  private demSource: DemSource | null = null;
   private needsMaskRender = true;
 
   private sweep: {
@@ -515,8 +516,21 @@ export class ShadowLayer implements CustomLayerInterface {
       this.fieldRegion,
       FIELD_SIZE,
       undefined,
-      this.demCache.maxZoomAt(this.demKind),
+      this.demCache.maxZoomAt(this.demSource),
     );
+  }
+
+  /**
+   * Choisit le produit d'élévation LiDAR. Tout le champ est à refaire : les altitudes
+   * changent de nature, et le zoom exploitable est à redécouvrir.
+   */
+  setLidarProduct(product: LidarProduct): void {
+    if (product === this.demCache.lidarProduct) return;
+    this.demCache.setLidarProduct(product);
+    this.field?.clearTiles();
+    this.demSource = null;
+    this.needsFieldRebuild = true;
+    this.map?.triggerRepaint();
   }
 
   /** Lance le chargement des tuiles manquantes. Renvoie `true` si tout est déjà là. */
@@ -538,9 +552,9 @@ export class ShadowLayer implements CustomLayerInterface {
         complete = false;
         void this.demCache.load({ x: wrapped, y, z: this.demZoom }).then((tile) => {
           if (!tile) return;
-          // La nature de la source ne se connaît qu'une fois une tuile obtenue : la
-          // première sert de sonde, les suivantes pourront être demandées plus fines.
-          this.demKind = tile.kind;
+          // La source ne se connaît qu'une fois une tuile obtenue : la première sert
+          // de sonde, les suivantes pourront être demandées plus fines.
+          this.demSource = tile.source;
           this.needsFieldRebuild = true;
           this.map?.triggerRepaint();
         });

@@ -438,6 +438,14 @@ progress {
   color: var(--text-muted);
 }
 
+/* Note sous un réglage : dit ce que l'option implique, sans peser dans le panneau. */
+.hint {
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 .disclaimer {
   margin: 14px 0 0;
   padding-top: 12px;

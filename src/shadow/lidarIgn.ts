@@ -19,8 +19,20 @@ import type { TileCoord } from '../sun/mercator';
 
 const WMS_URL = 'https://data.geopf.fr/wms-r';
 
-/** MNS issu du LiDAR HD, en WGS84 pseudo-Mercator. */
-const LAYER = 'IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.WGS84G';
+/**
+ * Deux produits, deux usages.
+ *
+ * `mnt` est le sol nu : les bâtiments continuent d'être extrudés depuis OpenStreetMap,
+ * ce qui donne une carte lisible et valable toute l'année. `mns` est la surface telle
+ * qu'elle a été mesurée, arbres compris — plus exact, mais le feuillage est celui du
+ * jour de la campagne LiDAR, ce qui trompe en hiver.
+ */
+export type LidarProduct = 'mnt' | 'mns';
+
+const LAYERS: Record<LidarProduct, string> = {
+  mnt: 'IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.WGS84G',
+  mns: 'IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.WGS84G',
+};
 
 /** Valeur rendue par le service hors couverture. */
 export const NO_DATA_IGN = -9999;
@@ -44,12 +56,16 @@ export function tileBounds3857(coord: TileCoord): [number, number, number, numbe
   return [minX, maxY - span, minX + span, maxY];
 }
 
-export function lidarTileUrl(coord: TileCoord, size = IGN_TILE_SIZE): string {
+export function lidarTileUrl(
+  coord: TileCoord,
+  product: LidarProduct,
+  size = IGN_TILE_SIZE,
+): string {
   const params = new URLSearchParams({
     SERVICE: 'WMS',
     VERSION: '1.3.0',
     REQUEST: 'GetMap',
-    LAYERS: LAYER,
+    LAYERS: LAYERS[product],
     STYLES: '',
     CRS: 'EPSG:3857',
     BBOX: tileBounds3857(coord).join(','),
@@ -90,11 +106,12 @@ export function decodeBil32(buffer: ArrayBuffer, size = IGN_TILE_SIZE): Float32A
  */
 export async function fetchLidarTile(
   coord: TileCoord,
+  product: LidarProduct,
   signal?: AbortSignal,
 ): Promise<Float32Array | null> {
   if (coord.z > IGN_MAX_ZOOM) return null;
 
-  const response = await fetch(lidarTileUrl(coord), { signal, mode: 'cors' });
+  const response = await fetch(lidarTileUrl(coord, product), { signal, mode: 'cors' });
   if (!response.ok) {
     throw new Error(`LiDAR IGN : réponse ${response.status}`);
   }

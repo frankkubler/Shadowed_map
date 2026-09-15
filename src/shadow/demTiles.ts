@@ -15,7 +15,12 @@
  */
 import { latToMercatorY, lngToMercatorX, type TileCoord } from '../sun/mercator';
 import { decodePngRgb8 } from './png';
-import { fetchLidarTile, IGN_MAX_ZOOM, IGN_TILE_SIZE } from './lidarIgn';
+import {
+  fetchLidarTile,
+  IGN_MAX_ZOOM,
+  IGN_TILE_SIZE,
+  type LidarProduct,
+} from './lidarIgn';
 
 export const TERRARIUM_TILE_SIZE = 256;
 export const TERRARIUM_MAX_ZOOM = 15;
@@ -32,6 +37,9 @@ export const NO_DATA_ELEVATION = -10000;
  */
 export type DemKind = 'terrain' | 'surface';
 
+/** D'où vient la tuile : c'est la source, et non sa nature, qui borne la finesse. */
+export type DemSource = 'lidar' | 'terrarium';
+
 export interface DemTile {
   coord: TileCoord;
   size: number;
@@ -40,6 +48,7 @@ export interface DemTile {
   minElevation: number;
   maxElevation: number;
   kind: DemKind;
+  source: DemSource;
 }
 
 function tileKey(z: number, x: number, y: number): string {
@@ -93,6 +102,8 @@ export class DemTileCache {
   private tiles = new Map<string, DemTile>();
   private inFlight = new Map<string, Promise<DemTile | null>>();
   private failed = new Set<string>();
+  /** Incrémentée à chaque changement de source : périme les requêtes déjà en vol. */
+  private generation = 0;
 
   /**
    * `baseUrl` permet de pointer vers un miroir ou un jeu de tuiles local — ce dont se
@@ -106,11 +117,29 @@ export class DemTileCache {
      * fin que terrarium et porte le sursol. Désactivable pour le banc de vérification.
      */
     private readonly useLidar = true,
+    private product: LidarProduct = 'mnt',
   ) {}
 
   /** Zoom maximal exploitable ici : celui du LiDAR s'il couvre, celui de terrarium sinon. */
-  maxZoomAt(kind: DemKind | null): number {
-    return kind === 'surface' ? IGN_MAX_ZOOM : TERRARIUM_MAX_ZOOM;
+  maxZoomAt(source: DemSource | null): number {
+    return source === 'lidar' ? IGN_MAX_ZOOM : TERRARIUM_MAX_ZOOM;
+  }
+
+  get lidarProduct(): LidarProduct {
+    return this.product;
+  }
+
+  /**
+   * Change de produit LiDAR. Les altitudes changent de nature : tout ce qui était en
+   * cache est périmé, y compris les tuiles terrarium, dont le zoom ne correspondra plus.
+   */
+  setLidarProduct(product: LidarProduct): void {
+    if (product === this.product) return;
+    this.product = product;
+    this.generation++;
+    this.tiles.clear();
+    this.failed.clear();
+    this.inFlight.clear();
   }
 
   get(z: number, x: number, y: number): DemTile | undefined {
@@ -134,8 +163,12 @@ export class DemTileCache {
     const pending = this.inFlight.get(key);
     if (pending) return pending;
 
+    const generation = this.generation;
     const promise = this.fetchTile(coord, signal)
       .then((tile) => {
+        // Une réponse qui arrive après un changement de source décrit l'ancien monde :
+        // la mettre en cache ferait réapparaître des altitudes qu'on vient d'écarter.
+        if (generation !== this.generation) return null;
         if (tile) this.insert(key, tile);
         else this.failed.add(key);
         return tile;
@@ -160,9 +193,13 @@ export class DemTileCache {
       // au lieu d'être classée absente à tort.
       const secours = coord.z <= TERRARIUM_MAX_ZOOM;
       const lidar = secours
-        ? await fetchLidarTile(coord, signal).catch(() => null)
-        : await fetchLidarTile(coord, signal);
-      if (lidar) return this.buildTile(coord, IGN_TILE_SIZE, lidar, 'surface');
+        ? await fetchLidarTile(coord, this.product, signal).catch(() => null)
+        : await fetchLidarTile(coord, this.product, signal);
+      if (lidar) {
+        // Seul le MNS porte le sursol ; le MNT est un sol nu, comme terrarium.
+        const kind: DemKind = this.product === 'mns' ? 'surface' : 'terrain';
+        return this.buildTile(coord, IGN_TILE_SIZE, lidar, kind, 'lidar');
+      }
     }
     // Terrarium ne va pas au-delà de son zoom natif : au-dessus, mieux vaut pas de
     // tuile du tout qu'une tuile étirée qui contredirait ses voisines.
@@ -178,7 +215,13 @@ export class DemTileCache {
     const png = await decodePngRgb8(donnees);
 
     if (png) {
-      return this.buildTile(coord, png.width, decodeTerrarium(png.rgb, png.width, 3), 'terrain');
+      return this.buildTile(
+        coord,
+        png.width,
+        decodeTerrarium(png.rgb, png.width, 3),
+        'terrain',
+        'terrarium',
+      );
     }
     const bitmap = await createImageBitmap(new Blob([donnees]));
     const size = bitmap.width;
@@ -187,7 +230,7 @@ export class DemTileCache {
     ctx.drawImage(bitmap, 0, 0);
     bitmap.close();
     const elevations = decodeTerrarium(ctx.getImageData(0, 0, size, size).data, size, 4);
-    return this.buildTile(coord, size, elevations, 'terrain');
+    return this.buildTile(coord, size, elevations, 'terrain', 'terrarium');
   }
 
   private buildTile(
@@ -195,6 +238,7 @@ export class DemTileCache {
     size: number,
     elevations: Float32Array,
     kind: DemKind,
+    source: DemSource,
   ): DemTile {
     let min = Infinity;
     let max = -Infinity;
@@ -202,7 +246,7 @@ export class DemTileCache {
       if (v < min) min = v;
       if (v > max) max = v;
     }
-    return { coord, size, elevations, minElevation: min, maxElevation: max, kind };
+    return { coord, size, elevations, minElevation: min, maxElevation: max, kind, source };
   }
 
   private insert(key: string, tile: DemTile): void {
