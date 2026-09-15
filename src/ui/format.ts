@@ -55,3 +55,33 @@ export function fromDateInputValue(value: string, current: Date): Date | null {
   next.setFullYear(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
   return Number.isNaN(next.getTime()) ? null : next;
 }
+
+/**
+ * Vitesse d'animation : minutes simulées par seconde réelle.
+ *
+ * L'échelle est géométrique, parce qu'une vitesse se perçoit en proportion : passer de
+ * 30 à 60 min/s change autant l'allure que passer de 300 à 600. Un curseur linéaire
+ * rendrait toute la moitié lente inutilisable.
+ */
+export const MIN_ANIMATION_SPEED = 10;
+export const MAX_ANIMATION_SPEED = 1440;
+
+/** Position du curseur, de 0 à 100, vers une vitesse en minutes par seconde. */
+export function animationSpeedFromSlider(position: number): number {
+  const t = Math.min(100, Math.max(0, position)) / 100;
+  return MIN_ANIMATION_SPEED * Math.pow(MAX_ANIMATION_SPEED / MIN_ANIMATION_SPEED, t);
+}
+
+/** L'inverse, pour poser le curseur sur une vitesse donnée. */
+export function sliderFromAnimationSpeed(minutesPerSecond: number): number {
+  const borne = Math.min(MAX_ANIMATION_SPEED, Math.max(MIN_ANIMATION_SPEED, minutesPerSecond));
+  const t = Math.log(borne / MIN_ANIMATION_SPEED) / Math.log(MAX_ANIMATION_SPEED / MIN_ANIMATION_SPEED);
+  return Math.round(t * 100);
+}
+
+/** « 4 h/s », « 30 min/s ». En dessous d'une heure par seconde, les minutes parlent mieux. */
+export function formatAnimationSpeed(minutesPerSecond: number): string {
+  if (minutesPerSecond < 60) return `${Math.round(minutesPerSecond)} min/s`;
+  const heures = minutesPerSecond / 60;
+  return `${heures < 10 ? heures.toFixed(1).replace('.0', '') : Math.round(heures)} h/s`;
+}

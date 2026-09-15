@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_STATE, deserializeState, serializeState, Store } from '../src/state/appState';
+import {
+  DEFAULT_STATE,
+  deserializeState,
+  hashSpecifiesDate,
+  serializeState,
+  Store,
+} from '../src/state/appState';
 import {
   formatDuration,
   formatMinutesOfDay,
@@ -133,5 +139,32 @@ describe('formatage du temps', () => {
 
   it('rejette une date mal formée', () => {
     expect(fromDateInputValue('14/09/2026', new Date())).toBeNull();
+  });
+});
+
+// C'est ce qui décide si la carte suit l'heure réelle : un lien qui désigne un instant
+// ne doit jamais être écrasé par l'horloge.
+describe('instant demandé par le lien', () => {
+  it('reconnaît une date dans le hash', () => {
+    expect(hashSpecifiesDate('#12.5/45.8992/6.8677/0/0/2026-09-14T18:30/shadow')).toBe(true);
+    expect(hashSpecifiesDate('12.5/45.8992/6.8677/0/0/2026-09-14T18:30')).toBe(true);
+  });
+
+  it('ne voit pas de date là où il n’y en a pas', () => {
+    expect(hashSpecifiesDate('')).toBe(false);
+    expect(hashSpecifiesDate('#')).toBe(false);
+    expect(hashSpecifiesDate('#12.5/45.8992/6.8677')).toBe(false);
+    expect(hashSpecifiesDate('#12.5/45.8992/6.8677/0/0')).toBe(false);
+  });
+
+  it('refuse une date illisible plutôt que de la croire sur parole', () => {
+    expect(hashSpecifiesDate('#12.5/45.8992/6.8677/0/0/pas-une-date/shadow')).toBe(false);
+    expect(hashSpecifiesDate('#12.5/45.8992/6.8677/0/0/2026-09-14/shadow')).toBe(false);
+  });
+
+  // `new Date(2026, 12, 45)` ne vaut pas NaN : JavaScript reporte les débordements sur
+  // le mois suivant. Un tel hash désigne donc bien un instant, aussi saugrenu soit-il.
+  it('accepte une date que JavaScript normalise', () => {
+    expect(hashSpecifiesDate('#12.5/45.8992/6.8677/0/0/2026-13-45T99:99/shadow')).toBe(true);
   });
 });

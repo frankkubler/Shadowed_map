@@ -150,6 +150,18 @@ export class Store {
   }
 }
 
+/**
+ * Le hash de départ portait-il un instant ?
+ *
+ * Distinguer les deux cas est ce qui permet à l'application de suivre l'heure réelle
+ * quand personne n'a demandé d'instant précis, sans jamais trahir un lien partagé, qui
+ * lui désigne une heure choisie.
+ */
+export function hashSpecifiesDate(hash: string): boolean {
+  const parts = hash.replace(/^#/, '').split('/');
+  return parts.length >= 3 && parts[5] !== undefined && parseLocalDate(parts[5]) !== null;
+}
+
 export function createStore(): Store {
   const fromUrl =
     typeof window !== 'undefined' && window.location.hash.length > 1

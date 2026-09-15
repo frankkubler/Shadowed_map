@@ -4,7 +4,7 @@ import './styles/app.css';
 
 import { createMap } from './map/createMap';
 import { BASEMAPS, type BasemapId } from './map/style';
-import { createStore, type AppState } from './state/appState';
+import { createStore, hashSpecifiesDate, type AppState } from './state/appState';
 import { ShadowLayer, type ShadowLayerState } from './shadow/ShadowLayer';
 import { MIN_BUILDING_ZOOM } from './shadow/buildings';
 import { createSunPanel } from './ui/sunPanel';
@@ -14,16 +14,22 @@ import { createTerracesUi } from './ui/terraces';
 import { createTrackUi } from './ui/track';
 import { onColorSchemeChange, stateColors } from './ui/palette';
 import {
+  animationSpeedFromSlider,
+  formatAnimationSpeed,
   formatDuration,
   formatMinutesOfDay,
   fromDateInputValue,
   minutesOfDay,
+  sliderFromAnimationSpeed,
   toDateInputValue,
   withMinutesOfDay,
 } from './ui/format';
 
-/** Vitesse de l'animation : minutes simulées par seconde réelle. */
-const ANIMATION_MINUTES_PER_SECOND = 240;
+/** Vitesse d'animation au premier chargement, en minutes simulées par seconde réelle. */
+const DEFAULT_ANIMATION_SPEED = 240;
+
+/** Pas de l'horloge : la minute est la plus petite unité que l'interface affiche. */
+const CLOCK_TICK_MS = 60_000;
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -32,6 +38,10 @@ function requireElement<T extends HTMLElement>(id: string): T {
 }
 
 function main(): void {
+  // Lu avant que le store ne réécrive le hash : c'est l'intention de l'utilisateur au
+  // moment où il a ouvert la page, pas l'état courant.
+  const instantDemande = hashSpecifiesDate(window.location.hash);
+
   const store = createStore();
   store.bindToLocationHash();
 
@@ -199,6 +209,8 @@ function main(): void {
   const timeOutput = requireElement<HTMLOutputElement>('time-output');
   const playButton = requireElement<HTMLButtonElement>('play-button');
   const nowButton = requireElement<HTMLButtonElement>('now-button');
+  const speedSlider = requireElement<HTMLInputElement>('speed-slider');
+  const speedOutput = requireElement<HTMLOutputElement>('speed-output');
   const sunPanel = createSunPanel(requireElement('sun-info'));
 
   const syncTimeControls = (state: Readonly<AppState>) => {
@@ -208,7 +220,28 @@ function main(): void {
     timeOutput.textContent = formatMinutesOfDay(minutes);
   };
 
+  // --- Horloge ---------------------------------------------------------------
+
+  // La carte suit l'heure réelle tant que personne n'a demandé un autre instant. Un lien
+  // partagé désigne une heure choisie : on ne la remplace pas. Le bouton « Maintenant »
+  // relance le suivi, c'est bien ce qu'il veut dire.
+  let clockTimer: ReturnType<typeof setInterval> | null = null;
+
+  const stopClock = () => {
+    if (clockTimer === null) return;
+    clearInterval(clockTimer);
+    clockTimer = null;
+    nowButton.setAttribute('aria-pressed', 'false');
+  };
+
+  const startClock = () => {
+    if (clockTimer !== null) return;
+    nowButton.setAttribute('aria-pressed', 'true');
+    clockTimer = setInterval(() => store.set({ date: new Date() }), CLOCK_TICK_MS);
+  };
+
   dateInput.addEventListener('change', () => {
+    stopClock();
     const next = fromDateInputValue(dateInput.value, store.get().date);
     if (next) store.set({ date: next });
   });
@@ -218,23 +251,41 @@ function main(): void {
     next.setDate(next.getDate() + days);
     store.set({ date: next });
   };
-  requireElement('day-prev').addEventListener('click', () => shiftDay(-1));
-  requireElement('day-next').addEventListener('click', () => shiftDay(1));
+  const shiftDayAndStop = (days: number) => {
+    stopClock();
+    shiftDay(days);
+  };
+  requireElement('day-prev').addEventListener('click', () => shiftDayAndStop(-1));
+  requireElement('day-next').addEventListener('click', () => shiftDayAndStop(1));
 
   timeSlider.addEventListener('input', () => {
     stopAnimation();
+    stopClock();
     store.set({ date: withMinutesOfDay(store.get().date, Number(timeSlider.value)) });
   });
 
   nowButton.addEventListener('click', () => {
     stopAnimation();
     store.set({ date: new Date() });
+    startClock();
   });
+
+  if (!instantDemande) startClock();
 
   // --- Animation de la journée ---------------------------------------------
 
   let animationFrame: number | null = null;
   let lastFrameTime = 0;
+  let animationSpeed = DEFAULT_ANIMATION_SPEED;
+
+  const syncSpeed = () => {
+    animationSpeed = animationSpeedFromSlider(Number(speedSlider.value));
+    speedOutput.textContent = formatAnimationSpeed(animationSpeed);
+  };
+  speedSlider.value = String(sliderFromAnimationSpeed(DEFAULT_ANIMATION_SPEED));
+  syncSpeed();
+  // La vitesse se règle aussi en cours d'animation : `tick` relit `animationSpeed`.
+  speedSlider.addEventListener('input', syncSpeed);
 
   const stopAnimation = () => {
     if (animationFrame === null) return;
@@ -249,7 +300,7 @@ function main(): void {
     lastFrameTime = now;
 
     const current = store.get().date;
-    const advanced = new Date(current.getTime() + elapsedSeconds * ANIMATION_MINUTES_PER_SECOND * 60000);
+    const advanced = new Date(current.getTime() + elapsedSeconds * animationSpeed * 60000);
     // Rebouclage sur la même journée : l'animation montre un cycle, pas une dérive
     // sur plusieurs jours.
     if (advanced.getDate() !== current.getDate()) {
@@ -266,6 +317,7 @@ function main(): void {
       stopAnimation();
       return;
     }
+    stopClock();
     // L'accumulation d'ensoleillement repart de zéro à chaque changement d'heure :
     // l'animer n'aurait aucun sens et saturerait le GPU.
     if (store.get().mode === 'exposure') store.set({ mode: 'shadow' });
