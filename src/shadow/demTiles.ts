@@ -14,6 +14,7 @@
  * (popup au clic, calage des bâtiments sur le relief).
  */
 import { latToMercatorY, lngToMercatorX, type TileCoord } from '../sun/mercator';
+import { decodePngRgb8 } from './png';
 
 export const TERRARIUM_TILE_SIZE = 256;
 export const TERRARIUM_MAX_ZOOM = 15;
@@ -58,11 +59,15 @@ function getDecodeContext(size: number) {
   return decodeContext;
 }
 
-function decodeTerrarium(pixels: Uint8ClampedArray, size: number): DemTile['elevations'] {
+function decodeTerrarium(
+  pixels: Uint8ClampedArray | Uint8Array,
+  size: number,
+  stride: number,
+): DemTile['elevations'] {
   const count = size * size;
   const elevations = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    const o = i * 4;
+    const o = i * stride;
     const r = pixels[o] ?? 0;
     const g = pixels[o + 1] ?? 0;
     const b = pixels[o + 2] ?? 0;
@@ -134,15 +139,25 @@ export class DemTileCache {
     const response = await fetch(url, { signal, mode: 'cors' });
     if (!response.ok) return null;
 
-    const blob = await response.blob();
-    const bitmap = await createImageBitmap(blob);
-    const size = bitmap.width;
-    const ctx = getDecodeContext(size);
-    ctx.clearRect(0, 0, size, size);
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
+    // Décodage exact, sans canvas : voir `png.ts`. Le chemin par canvas reste en repli
+    // pour un format de tuile inattendu, au prix de quelques pixels altérés.
+    const donnees = await response.arrayBuffer();
+    const png = await decodePngRgb8(donnees);
 
-    const elevations = decodeTerrarium(ctx.getImageData(0, 0, size, size).data, size);
+    let size: number;
+    let elevations: DemTile['elevations'];
+    if (png) {
+      size = png.width;
+      elevations = decodeTerrarium(png.rgb, size, 3);
+    } else {
+      const bitmap = await createImageBitmap(new Blob([donnees]));
+      size = bitmap.width;
+      const ctx = getDecodeContext(size);
+      ctx.clearRect(0, 0, size, size);
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      elevations = decodeTerrarium(ctx.getImageData(0, 0, size, size).data, size, 4);
+    }
     let min = Infinity;
     let max = -Infinity;
     for (const v of elevations) {
