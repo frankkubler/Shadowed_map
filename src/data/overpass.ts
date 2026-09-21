@@ -4,7 +4,8 @@
  * Overpass est un service bénévole et fragile. Toute la sobriété de ce projet vis-à-vis
  * de lui tient dans ce fichier : une requête par déplacement significatif, résultats
  * réutilisés tant que la nouvelle vue tient dans une enveloppe déjà téléchargée,
- * annulation des requêtes obsolètes, et bascule sur un miroir en cas d'échec.
+ * annulation des requêtes obsolètes, délai propre à chaque miroir, et bascule sur le
+ * suivant en cas d'échec — un miroir muet étant mis à l'écart comme un miroir saturé.
  *
  * Les bâtiments et les terrasses passent tous deux par ici. Dupliquer cette logique
  * pour chaque couche de données serait le meilleur moyen de se faire bloquer.
@@ -38,6 +39,19 @@ const cooldowns = new Map<string, number>();
 /** Délai retenu quand le serveur ne dit rien. */
 const DEFAULT_COOLDOWN_MS = 60_000;
 const MAX_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * Délai au-delà duquel un miroir est tenu pour muet.
+ *
+ * Il doit rester au-dessus du `[timeout:25]` que déclarent les requêtes : le serveur a
+ * le droit de calculer vingt-cinq secondes avant de répondre, et couper plus tôt
+ * sacrifierait des réponses légitimes sur les grandes emprises. La marge couvre
+ * l'établissement de la connexion et le transfert.
+ *
+ * Le délai passe par `setTimeout` et non par `AbortSignal.timeout` : ce dernier échappe
+ * aux faux timers, et le mécanisme ne serait pas vérifiable.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
 
 function cooldownMs(response: Response): number {
   const retryAfter = response.headers.get('Retry-After');
@@ -97,12 +111,21 @@ export async function runOverpassQuery(
     if (reprise !== undefined && reprise > maintenant) continue;
     tousEnAttente = false;
 
+    // Un miroir qui accepte la connexion puis se tait bloquait toute la rotation : les
+    // suivants n'étaient jamais essayés, et la couche restait vide sans qu'aucune erreur
+    // ne remonte — donc sans bandeau non plus. Mesuré sur overpass.kumi.systems, qui
+    // laissait la requête pendante indéfiniment alors qu'overpass.osm.ch répondait en
+    // 0,4 s. `AbortSignal.any` combine le délai avec l'annulation de l'appelant, qui
+    // reste prioritaire et doit continuer de remonter telle quelle.
+    const expiration = new AbortController();
+    const minuteur = setTimeout(() => expiration.abort(), REQUEST_TIMEOUT_MS);
+
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
         body: `data=${encodeURIComponent(query)}`,
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal,
+        signal: AbortSignal.any([signal, expiration.signal]),
       });
       if (!response.ok) {
         // 429 : quota dépassé. 504 : la file du serveur est pleine. Dans les deux cas
@@ -119,7 +142,13 @@ export async function runOverpassQuery(
       return json.elements ?? [];
     } catch (error) {
       if (signal.aborted) throw error;
-      // Miroir suivant.
+      // Le miroir n'a pas répondu : connexion refusée, ou silence jusqu'au délai. Le
+      // mettre à l'écart est le vrai correctif — sans cela, chaque requête suivante
+      // reperdrait le même délai avant d'atteindre les miroirs valides, et un
+      // déplacement de carte l'annulerait avant d'y arriver.
+      cooldowns.set(endpoint, Date.now() + DEFAULT_COOLDOWN_MS);
+    } finally {
+      clearTimeout(minuteur);
     }
   }
   throw new Error(
