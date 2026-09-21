@@ -1,0 +1,21 @@
+# Dépendances et artefacts : reconstruits dans l'image, inutiles au contexte.
+node_modules/
+dist/
+coverage/
+.vite/
+
+# La clé CARTO passe par un --build-arg, jamais par un fichier copié dans l'image.
+.env
+.env.*
+!.env.example
+
+.git/
+.github/
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+# nginx.conf est copié par le Dockerfile : ne pas l'exclure du contexte.
+README.md
+*.local
+.DS_Store

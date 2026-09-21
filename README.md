@@ -159,6 +159,38 @@ qu'un bâtiment posé sur ce relief projette bien son ombre.
 Derrière un réseau restreint, un miroir local de tuiles peut être passé en paramètre :
 `?dem=http://127.0.0.1:5180`.
 
+## Déploiement en conteneur
+
+Le site est statique : l'image construit le bundle, puis nginx le sert. Aucune donnée
+ne transite par ce serveur — le navigateur interroge directement l'IGN, Overpass,
+Nominatim et CARTO, et c'est donc le poste client qui a besoin de l'accès réseau, pas
+l'hôte du conteneur.
+
+```bash
+cp .env.example .env    # y poser CARTO_BASEMAPS_API_KEY
+docker compose up -d --build
+```
+
+Le conteneur écoute par défaut sur `127.0.0.1:8080`, pour être atteint par un reverse
+proxy plutôt que directement : la terminaison TLS, les redirections et HSTS relèvent de
+l'amont. `BIND_ADDR`, `HTTP_PORT` et `BASE_PATH` se règlent dans `.env` ; les cas
+courants — proxy sur un autre pair, proxy en conteneur, site sous un sous-chemin — sont
+commentés dans `docker-compose.yml`.
+
+Deux points valent d'être connus :
+
+- `vite.config.ts` fixe `base` à `/Shadowed_map/` pour GitHub Pages. L'image rebâtit
+  avec `--base=/`, sans quoi `index.html` demanderait `/Shadowed_map/assets/…` et la
+  page resterait blanche.
+- La clé CARTO est résolue **au build** et se retrouve en clair dans le bundle, comme
+  pour le site publié. Un secret monté n'y changerait rien ; le quota gratuit est la
+  seule protection.
+
+L'image rejoue `typecheck`, `lint` et les tests avant de produire le bundle : une
+régression arrête la construction au lieu de se découvrir en production. Le banc de
+vérification GPU (`tools/gpu-check.html`) n'est pas dans le bundle et reste un outil de
+développement.
+
 ## Sources de données et attributions
 
 Ce projet n'existe que grâce à des données et des services ouverts. Leur usage est
