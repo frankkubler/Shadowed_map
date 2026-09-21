@@ -59,6 +59,13 @@ Quelques points sensibles, détaillés dans les commentaires du code :
 - Le zoom d'élévation exploitable dépend de la **source** : terrarium dérive de données
   à 25–30 m et s'arrête tôt, le LiDAR descend à 50 cm. Le nombre de tuiles par vue
   reste **plafonné**, ce qui borne les requêtes quelle que soit la source.
+- Le LiDAR n'est demandé que dans une **fenêtre de zoom** (`src/shadow/lidarIgn.ts`) :
+  au-dessus de z18 il n'apporte plus rien, en dessous de z13 non plus, puisqu'une tuile
+  de 256 px couvre alors des dizaines de kilomètres et que le service doit rééchantillonner
+  une emprise énorme pour un résultat que terrarium donne à l'identique. Les requêtes
+  sont par ailleurs **menées six par six**, et le LiDAR mis de côté trente secondes
+  après un `429` : la limite de débit de la Géoplateforme porte sur l'adresse IP, donc
+  insister tuile par tuile ne fait que la reconduire (`src/shadow/demTiles.ts`).
 - Les tuiles d'élévation sont **décodées sans passer par le canvas**
   (`src/shadow/png.ts`) : `createImageBitmap` + `drawImage` + `getImageData` n'est pas
   fidèle à l'octet près, et une unité du canal rouge vaut 256 mètres. Mesuré : 78 pixels

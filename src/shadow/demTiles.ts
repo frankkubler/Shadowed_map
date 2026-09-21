@@ -18,7 +18,9 @@ import { decodePngRgb8 } from './png';
 import {
   fetchLidarTile,
   IGN_MAX_ZOOM,
+  IGN_MIN_ZOOM,
   IGN_TILE_SIZE,
+  LidarHttpError,
   type LidarProduct,
 } from './lidarIgn';
 
@@ -29,6 +31,27 @@ export const TERRARIUM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terr
 
 /** Valeur rendue quand aucune donnée n'est disponible : plus basse que tout terrain réel. */
 export const NO_DATA_ELEVATION = -10000;
+
+/**
+ * Requêtes réseau menées de front.
+ *
+ * Le champ de hauteur demande d'un coup toutes les tuiles de sa région — viewport plus
+ * marge, et marge omnidirectionnelle pendant un balayage horaire. Sans plafond, cela
+ * part en une seule rafale de plusieurs dizaines de requêtes, ce qui suffit à déclencher
+ * la limite de débit de la Géoplateforme, et se voit aussi en `ERR_HTTP2_PROTOCOL_ERROR`
+ * quand le serveur coupe les flux.
+ */
+const MAX_REQUETES_SIMULTANEES = 6;
+
+/**
+ * Durée pendant laquelle le LiDAR est mis de côté après un 429.
+ *
+ * La limite porte sur l'adresse IP, pas sur la tuile : la pause doit donc être commune à
+ * toutes les tuiles. Sans elle, la rafale se reforme au déplacement suivant, puisqu'un
+ * refus n'est délibérément pas mémorisé tuile par tuile (voir `load`) — la limite se
+ * nourrit alors d'elle-même.
+ */
+const PAUSE_APRES_429_MS = 30_000;
 
 /**
  * Nature de la tuile. `surface` signifie que le sursol — toits, arbres — est déjà dans
@@ -104,6 +127,11 @@ export class DemTileCache {
   private failed = new Set<string>();
   /** Incrémentée à chaque changement de source : périme les requêtes déjà en vol. */
   private generation = 0;
+  /** Requêtes réseau en cours, et files d'attente des suivantes. */
+  private enCours = 0;
+  private attente: (() => void)[] = [];
+  /** Instant avant lequel le LiDAR n'est pas réinterrogé, après un 429. */
+  private pauseLidarJusqua = 0;
 
   /**
    * `baseUrl` permet de pointer vers un miroir ou un jeu de tuiles local — ce dont se
@@ -164,7 +192,7 @@ export class DemTileCache {
     if (pending) return pending;
 
     const generation = this.generation;
-    const promise = this.fetchTile(coord, signal)
+    const promise = this.fetchAvecPlafond(coord, signal)
       .then((tile) => {
         // Une réponse qui arrive après un changement de source décrit l'ancien monde :
         // la mettre en cache ferait réapparaître des altitudes qu'on vient d'écarter.
@@ -186,15 +214,72 @@ export class DemTileCache {
     return promise;
   }
 
+  /**
+   * Prend un jeton avant de laisser partir la requête, et le rend dans tous les cas.
+   *
+   * La déduplication par tuile de `load` ne borne pas le débit : elle empêche de
+   * demander deux fois la même tuile, pas d'en demander cinquante différentes d'un coup.
+   */
+  private async fetchAvecPlafond(
+    coord: TileCoord,
+    signal?: AbortSignal,
+  ): Promise<DemTile | null> {
+    // `while` et non `if` : plusieurs attentes peuvent être réveillées, chacune doit
+    // revérifier qu'il reste bien un jeton pour elle.
+    while (this.enCours >= MAX_REQUETES_SIMULTANEES) {
+      await new Promise<void>((resolve) => this.attente.push(resolve));
+    }
+    this.enCours++;
+    try {
+      return await this.fetchTile(coord, signal);
+    } finally {
+      this.enCours--;
+      this.attente.shift()?.();
+    }
+  }
+
+  /** Vrai tant que la limite de débit de la Géoplateforme est supposée active. */
+  private lidarEnPause(): boolean {
+    return Date.now() < this.pauseLidarJusqua;
+  }
+
+  /** Le LiDAR vaut-il d'être interrogé pour ce zoom, maintenant ? */
+  private lidarUtilisable(z: number): boolean {
+    if (!this.useLidar) return false;
+    if (z < IGN_MIN_ZOOM || z > IGN_MAX_ZOOM) return false;
+    return !this.lidarEnPause();
+  }
+
+  /**
+   * Charge une tuile LiDAR en retenant une limite de débit au passage.
+   *
+   * Le refus continue de lever, comme avant : c'est ce qui distingue un incident
+   * passager d'une absence de données. La pause n'y change rien pour cette tuile-ci,
+   * elle épargne les suivantes.
+   */
+  private async chargerLidar(
+    coord: TileCoord,
+    signal?: AbortSignal,
+  ): Promise<Float32Array | null> {
+    try {
+      return await fetchLidarTile(coord, this.product, signal);
+    } catch (erreur) {
+      if (erreur instanceof LidarHttpError && erreur.status === 429) {
+        this.pauseLidarJusqua = Date.now() + PAUSE_APRES_429_MS;
+      }
+      throw erreur;
+    }
+  }
+
   private async fetchTile(coord: TileCoord, signal?: AbortSignal): Promise<DemTile | null> {
-    if (this.useLidar && coord.z <= IGN_MAX_ZOOM) {
+    if (this.lidarUtilisable(coord.z)) {
       // Un refus du service est transitoire : on ne l'absorbe que si terrarium peut
       // prendre le relais. Sinon on laisse remonter, pour que la tuile soit redemandée
       // au lieu d'être classée absente à tort.
       const secours = coord.z <= TERRARIUM_MAX_ZOOM;
       const lidar = secours
-        ? await fetchLidarTile(coord, this.product, signal).catch(() => null)
-        : await fetchLidarTile(coord, this.product, signal);
+        ? await this.chargerLidar(coord, signal).catch(() => null)
+        : await this.chargerLidar(coord, signal);
       if (lidar) {
         // Seul le MNS porte le sursol ; le MNT est un sol nu, comme terrarium.
         const kind: DemKind = this.product === 'mns' ? 'surface' : 'terrain';
@@ -203,7 +288,14 @@ export class DemTileCache {
     }
     // Terrarium ne va pas au-delà de son zoom natif : au-dessus, mieux vaut pas de
     // tuile du tout qu'une tuile étirée qui contredirait ses voisines.
-    if (coord.z > TERRARIUM_MAX_ZOOM) return null;
+    if (coord.z > TERRARIUM_MAX_ZOOM) {
+      // Sauf pendant une pause : là, le LiDAR n'a pas dit que la tuile n'existait pas,
+      // il n'a simplement pas été interrogé. Lever plutôt que renvoyer `null` est
+      // capital — `null` la ferait classer absente pour de bon par `load`, et le trou
+      // survivrait très largement à la limite de débit qui l'a causé.
+      if (this.lidarEnPause()) throw new Error('LiDAR IGN : en pause après un 429');
+      return null;
+    }
 
     const url = `${this.baseUrl}/${coord.z}/${coord.x}/${coord.y}.png`;
     const response = await fetch(url, { signal, mode: 'cors' });

@@ -20,7 +20,10 @@ const reponsePng = () =>
   });
 
 describe('source d’élévation', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it('préfère le LiDAR quand il couvre la zone', async () => {
     vi.stubGlobal(
@@ -112,6 +115,98 @@ describe('source d’élévation', () => {
     );
 
     expect(await new DemTileCache().load({ z: 17, x: 68037, y: 46670 })).toBeNull();
+  });
+
+  // Une tuile de 256 px couvre 78 km de côté à z9 : demander du LiDAR à 50 cm pour
+  // produire 306 m par texel coûte cher au service et ne donne rien que terrarium
+  // n'ait déjà. Sans cette borne, une vue large sur la France partait en centaines de
+  // requêtes, et la Géoplateforme répondait en 429.
+  it('n’interroge pas le LiDAR aux zooms où il n’apporte rien', async () => {
+    const appels: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        appels.push(url);
+        return reponsePng();
+      }),
+    );
+
+    const tuile = await new DemTileCache().load({ z: 11, x: 1063, y: 729 });
+    expect(tuile?.source).toBe('terrarium');
+    expect(appels.some((u) => u.includes('geopf'))).toBe(false);
+  });
+
+  // La déduplication par tuile empêche de demander deux fois la même, pas d'en demander
+  // cinquante différentes d'un coup — ce que fait le champ de hauteur à chaque région.
+  it('borne le nombre de requêtes simultanées', async () => {
+    let enCours = 0;
+    let maximum = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        enCours++;
+        maximum = Math.max(maximum, enCours);
+        // Laisse la boucle d'événements donner leur chance aux requêtes suivantes :
+        // sans plafond, les 24 se chevaucheraient.
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        enCours--;
+        return reponseBil(1050);
+      }),
+    );
+
+    const cache = new DemTileCache();
+    await Promise.all(
+      Array.from({ length: 24 }, (_, i) => cache.load({ z: 15, x: 17009 + i, y: 11667 })),
+    );
+    expect(maximum).toBe(6);
+  });
+
+  // La limite de débit porte sur l'adresse IP, pas sur la tuile : insister tuile par
+  // tuile ne fait que la reconduire.
+  it('met le LiDAR de côté après un 429 au lieu de le rappeler aussitôt', async () => {
+    const appels: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        appels.push(url);
+        return url.includes('geopf') ? new Response('', { status: 429 }) : reponsePng();
+      }),
+    );
+
+    const cache = new DemTileCache();
+    expect((await cache.load(COORD))?.source).toBe('terrarium');
+    expect(appels.filter((u) => u.includes('geopf'))).toHaveLength(1);
+
+    expect((await cache.load({ z: 15, x: 17010, y: 11667 }))?.source).toBe('terrarium');
+    expect(appels.filter((u) => u.includes('geopf'))).toHaveLength(1);
+  });
+
+  // Au-delà du zoom de terrarium, une tuile non obtenue est normalement classée absente.
+  // Pendant une pause, ce serait à tort : le service n'a rien dit, il n'a pas été
+  // interrogé — et le trou survivrait de très loin à la limite de débit qui l'a causé.
+  it('ne classe pas une tuile absente quand le LiDAR est en pause', async () => {
+    let maintenant = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => maintenant);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 429 })));
+
+    const cache = new DemTileCache();
+    const voisine = { z: 17, x: 68038, y: 46670 };
+    expect(await cache.load({ z: 17, x: 68037, y: 46670 })).toBeNull();
+    expect(await cache.load(voisine)).toBeNull();
+
+    // La pause écoulée, le service répondant de nouveau : la tuile doit repartir en
+    // requête, ce qui prouve qu'elle n'a pas été mise sur liste noire.
+    maintenant += 31_000;
+    const appels: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        appels.push(url);
+        return reponseBil(1050);
+      }),
+    );
+    expect((await cache.load(voisine))?.source).toBe('lidar');
+    expect(appels).not.toHaveLength(0);
   });
 
   it('annonce le zoom exploitable selon la source', () => {
