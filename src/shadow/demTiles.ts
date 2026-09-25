@@ -54,15 +54,20 @@ const MAX_REQUETES_SIMULTANEES = 6;
 const PAUSE_APRES_429_MS = 10_000;
 
 /**
- * Délais avant de retenter une tuile qui a échoué, puis classement en absente.
+ * Délais avant de retenter une tuile qui a échoué, de plus en plus espacés.
  *
- * Un refus du service n'est pas classé absent d'emblée : mesuré, une requête sur huit
- * environ repart en 400 sans raison. Mais certaines emprises refusent à chaque fois, et
- * les redemander à chaque rendu faisait des milliers de requêtes sur les mêmes tuiles.
- * Deux nouvelles tentatives espacées suffisent à distinguer le hasard (une chance sur
- * cinq cents d'échouer trois fois) d'un refus durable.
+ * Un refus du service n'est jamais classé absent : vérifié, une tuile refusée en 400
+ * par l'application répondait correctement quand on la redemandait à la main. Le refus
+ * est passager — sans doute le service qui décroche sous la charge — et classer la tuile
+ * absente laisserait un trou là où la donnée existe. L'absence réelle se reconnaît
+ * autrement : le service répond alors, avec des valeurs NO_DATA_IGN.
+ *
+ * Ce qu'il fallait éviter, c'est de la redemander à chaque rendu : sur des emprises qui
+ * refusaient plusieurs fois de suite, cela partait en milliers de requêtes. D'où ces
+ * délais, sans aucune requête entre deux tentatives ; le dernier vaut ensuite pour
+ * toutes les suivantes.
  */
-const DELAIS_NOUVELLE_TENTATIVE_MS = [2_000, 8_000];
+const DELAIS_NOUVELLE_TENTATIVE_MS = [2_000, 8_000, 30_000, 60_000];
 
 /** Échec qui ne dit rien de la tuile elle-même : pause après un 429, annulation. */
 class EchecSansRapportAvecLaTuile extends Error {}
@@ -335,15 +340,11 @@ export class DemTileCache {
     return promise;
   }
 
-  /** Compte un échec de plus pour cette tuile ; au-delà des délais prévus, elle est absente. */
+  /** Compte un échec de plus pour cette tuile et repousse sa prochaine tentative. */
   private noterEchec(key: string): void {
     const nombre = (this.echecs.get(key)?.nombre ?? 0) + 1;
-    const delai = DELAIS_NOUVELLE_TENTATIVE_MS[nombre - 1];
-    if (delai === undefined) {
-      this.echecs.delete(key);
-      this.failed.add(key);
-      return;
-    }
+    const delais = DELAIS_NOUVELLE_TENTATIVE_MS;
+    const delai = delais[Math.min(nombre, delais.length) - 1] as number;
     this.echecs.set(key, { nombre, reprise: Date.now() + delai });
   }
 

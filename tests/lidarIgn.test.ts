@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   IGN_MAX_ZOOM,
   NO_DATA_IGN,
@@ -74,5 +75,33 @@ describe('tuiles LiDAR IGN', () => {
 
   it('ne demande rien au-delà du zoom utile', () => {
     expect(IGN_MAX_ZOOM).toBeGreaterThanOrEqual(15);
+  });
+});
+
+// Tuile réelle, téléchargée à la main depuis la Géoplateforme (MNT, z17, près de
+// Guebwiller). L'application s'était vu refuser cette même requête en 400 : la voir
+// répondre ici prouve que le refus était passager, et non une absence de couverture.
+describe('tuile LiDAR réelle', () => {
+  const coord = { z: 17, x: 68152, y: 45655 };
+  const fichier = readFileSync(
+    new URL('./fixtures/lidar-mnt-17-68152-45655.bil', import.meta.url),
+  );
+
+  it('demande exactement l’emprise de la tuile téléchargée', () => {
+    const url = new URL(lidarTileUrl(coord, 'mnt'));
+    const [minX, minY, maxX, maxY] = (url.searchParams.get('BBOX') ?? '').split(',').map(Number);
+    expect(minX).toBeCloseTo(799837.063976083, 3);
+    expect(minY).toBeCloseTo(6078272.489237215, 3);
+    expect(maxX).toBeCloseTo(800142.8120892236, 3);
+    expect(maxY).toBeCloseTo(6078578.237350356, 3);
+  });
+
+  it('se décode en altitudes plausibles, sans valeur manquante', () => {
+    const buffer = fichier.buffer.slice(fichier.byteOffset, fichier.byteOffset + fichier.byteLength);
+    const altitudes = decodeBil32(buffer);
+    expect(altitudes).not.toBeNull();
+    const valeurs = Array.from(altitudes ?? []);
+    expect(Math.min(...valeurs)).toBeGreaterThan(300);
+    expect(Math.max(...valeurs)).toBeLessThan(320);
   });
 });

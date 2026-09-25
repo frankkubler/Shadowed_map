@@ -114,7 +114,7 @@ describe('source d’élévation', () => {
 
   // Certaines emprises refusent à chaque fois : les redemander à chaque rendu faisait des
   // milliers de requêtes sur les mêmes tuiles.
-  it('espace les nouvelles tentatives puis classe absente une tuile toujours refusée', async () => {
+  it('espace les nouvelles tentatives d’une tuile refusée sans jamais la classer absente', async () => {
     let maintenant = 1_000_000;
     vi.spyOn(Date, 'now').mockImplementation(() => maintenant);
     const appels: string[] = [];
@@ -134,21 +134,26 @@ describe('source d’élévation', () => {
     // Pendant le délai, aucune requête : c'est ce qui casse la boucle.
     for (let i = 0; i < 50; i++) await cache.load(coord);
     expect(appels).toHaveLength(1);
-    expect(cache.delaiAvantNouvelleTentative(coord)).toBe(2_000);
 
-    maintenant += 2_001;
-    await cache.load(coord);
-    expect(appels).toHaveLength(2);
+    // Délais croissants, puis plafonnés : jamais de classement en absente, puisqu'un
+    // refus s'est révélé passager (la même tuile répondait quand on la redemandait).
+    const attendus = [2_000, 8_000, 30_000, 60_000, 60_000, 60_000];
+    for (const [i, delai] of attendus.entries()) {
+      expect(cache.delaiAvantNouvelleTentative(coord)).toBe(delai);
+      maintenant += delai - 1;
+      await cache.load(coord);
+      expect(appels).toHaveLength(i + 1);
+      maintenant += 2;
+      await cache.load(coord);
+      expect(appels).toHaveLength(i + 2);
+    }
+    expect(cache.isAbsent(coord)).toBe(false);
 
-    maintenant += 8_001;
-    await cache.load(coord);
-    expect(appels).toHaveLength(3);
-    expect(cache.isAbsent(coord)).toBe(true);
-
-    // Absente : plus jamais redemandée.
-    maintenant += 60_000;
-    await cache.load(coord);
-    expect(appels).toHaveLength(3);
+    // Et quand le service répond de nouveau, la tuile arrive.
+    vi.stubGlobal('fetch', vi.fn(async () => reponseBil(310)));
+    maintenant += 60_001;
+    expect((await cache.load(coord))?.source).toBe('lidar');
+    expect(cache.delaiAvantNouvelleTentative(coord)).toBeNull();
   });
 
   it('ne compte pas une limite de débit comme un refus de la tuile', async () => {
