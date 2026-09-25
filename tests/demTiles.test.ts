@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { DemTileCache } from '../src/shadow/demTiles';
+import { DemTileCache, resolveDemSource } from '../src/shadow/demTiles';
 import { NO_DATA_IGN } from '../src/shadow/lidarIgn';
 
 const tuilePng = readFileSync(new URL('./fixtures/terrarium-15-17009-11667.png', import.meta.url));
@@ -271,5 +271,104 @@ describe('source d’élévation', () => {
     altitude = 1062;
     cache.setLidarProduct('mns');
     expect((await cache.load(COORD))?.minElevation).toBeCloseTo(1062, 3);
+  });
+});
+
+describe('annulation des tuiles devenues inutiles', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** `fetch` qui ne répond qu'à la demande, et échoue comme le vrai sur annulation. */
+  const fetchManuel = () => {
+    const urls: string[] = [];
+    const enVol: (() => void)[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (url: string, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            urls.push(url);
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+            enVol.push(() => resolve(reponsePng()));
+          }),
+      ),
+    );
+    return { urls, enVol };
+  };
+
+  const tuile = (x: number) => ({ z: 15, x, y: 11667 });
+
+  it('fait passer la nouvelle vue devant les tuiles de l’ancienne encore en file', async () => {
+    const { urls, enVol } = fetchManuel();
+    const cache = new DemTileCache(256, undefined, false);
+
+    const vue1 = Array.from({ length: 6 }, (_, i) => tuile(100 + i));
+    const enFile = Array.from({ length: 3 }, (_, i) => tuile(200 + i));
+    const nouvelle = tuile(300);
+
+    const chargements1 = vue1.map((c) => cache.load(c));
+    const abandonnees = enFile.map((c) => cache.load(c));
+    await Promise.resolve();
+    expect(urls).toHaveLength(6);
+
+    // La vue a bougé : seule la nouvelle tuile compte, avec celles déjà en vol.
+    cache.retainOnly([...vue1, nouvelle]);
+    const chargementNouvelle = cache.load(nouvelle);
+
+    expect(await Promise.all(abandonnees)).toEqual([null, null, null]);
+    for (const reponse of enVol.splice(0)) reponse();
+    await Promise.all(chargements1);
+    await vi.waitFor(() => expect(urls).toHaveLength(7));
+    enVol.splice(0).forEach((reponse) => reponse());
+
+    expect((await chargementNouvelle)?.source).toBe('terrarium');
+    expect(urls.some((u) => u.includes('/15/200/'))).toBe(false);
+    expect(urls).toHaveLength(7);
+    // Annulée n'est pas absente : la tuile repartira si on y revient.
+    expect(cache.isAbsent(enFile[0]!)).toBe(false);
+  });
+
+  it('interrompt aussi une requête déjà en vol', async () => {
+    fetchManuel();
+    const cache = new DemTileCache(256, undefined, false);
+
+    const chargement = cache.load(tuile(1));
+    await Promise.resolve();
+    cache.retainOnly([]);
+
+    expect(await chargement).toBeNull();
+    expect(cache.isAbsent(tuile(1))).toBe(false);
+    expect(cache.get(15, 1, 11667)).toBeUndefined();
+  });
+});
+
+describe('choix de la source d’élévation sur tout le champ', () => {
+  const bilan = (partiel: Partial<Parameters<typeof resolveDemSource>[0]>) => ({
+    lidar: 0,
+    terrarium: 0,
+    absent: 0,
+    pending: 0,
+    ...partiel,
+  });
+
+  it('reste sur le LiDAR quand une tuile a dû se rabattre sur terrarium', () => {
+    // Un refus ponctuel du LiDAR rattrapé par terrarium ne doit pas faire redescendre
+    // le zoom, quel que soit l'ordre d'arrivée des tuiles.
+    expect(resolveDemSource(bilan({ lidar: 11, terrarium: 1 }), 'lidar')).toBe('lidar');
+    expect(resolveDemSource(bilan({ lidar: 11, terrarium: 1 }), 'terrarium')).toBe('lidar');
+  });
+
+  it('revient à terrarium hors couverture LiDAR', () => {
+    expect(resolveDemSource(bilan({ terrarium: 9 }), 'lidar')).toBe('terrarium');
+    // Au-delà de z15, hors couverture, toutes les tuiles sont absentes.
+    expect(resolveDemSource(bilan({ absent: 9 }), 'lidar')).toBe('terrarium');
+  });
+
+  it('garde la décision précédente tant que rien n’est tranché', () => {
+    expect(resolveDemSource(bilan({ pending: 9 }), 'lidar')).toBe('lidar');
+    expect(resolveDemSource(bilan({ absent: 3, pending: 6 }), 'lidar')).toBe('lidar');
+    expect(resolveDemSource(bilan({}), null)).toBeNull();
   });
 });

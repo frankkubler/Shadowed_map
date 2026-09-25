@@ -14,12 +14,13 @@ import {
   metersPerMercatorUnit,
   mercatorYToLat,
   type Bounds,
+  type TileCoord,
 } from '../sun/mercator';
 import { isDaylight, sameLocalDay, sunDirection, sunPosition, MIN_USEFUL_ALTITUDE_RAD } from '../sun/sun';
 import { createBuildingProvider, EMPTY_MESH, MIN_BUILDING_ZOOM, type BuildingResult } from './buildings';
-import type { DemSource } from './demTiles';
+import type { DemSource, DemTileCounts } from './demTiles';
 import type { LidarProduct } from './lidarIgn';
-import { DemTileCache } from './demTiles';
+import { DemTileCache, resolveDemSource } from './demTiles';
 import { createUnitQuad, detectCapabilities } from './glUtils';
 import { ProjectionProgramCache, setProjectionUniforms } from './projection';
 import { HeightField } from './heightField';
@@ -550,20 +551,45 @@ export class ShadowLayer implements CustomLayerInterface {
     const maxY = Math.min(scale - 1, Math.floor(latToMercatorY(bounds.south) * scale));
 
     let complete = true;
+    const wanted: TileCoord[] = [];
+    const counts: DemTileCounts = { lidar: 0, terrarium: 0, absent: 0, pending: 0 };
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
-        const wrapped = ((x % scale) + scale) % scale;
-        if (this.demCache.get(this.demZoom, wrapped, y)) continue;
+        const coord: TileCoord = { x: ((x % scale) + scale) % scale, y, z: this.demZoom };
+        wanted.push(coord);
+        const cached = this.demCache.get(coord.z, coord.x, coord.y);
+        if (cached) {
+          counts[cached.source]++;
+          continue;
+        }
         complete = false;
-        void this.demCache.load({ x: wrapped, y, z: this.demZoom }).then((tile) => {
-          if (!tile) return;
-          // La source ne se connaît qu'une fois une tuile obtenue : la première sert
-          // de sonde, les suivantes pourront être demandées plus fines.
-          this.demSource = tile.source;
+        if (this.demCache.isAbsent(coord)) {
+          counts.absent++;
+          continue;
+        }
+        counts.pending++;
+        void this.demCache.load(coord).then((tile) => {
+          // Un échec passager ou une annulation ne déclenche rien : la tuile repartira au
+          // prochain rendu. Relancer ici tournerait en boucle, une frame après l'autre.
+          if (!tile && !this.demCache.isAbsent(coord)) return;
+          // Une tuile obtenue ou classée absente peut changer la source retenue, donc le
+          // zoom : le bilan est refait au prochain rendu, sur tout le champ.
           this.needsFieldRebuild = true;
           this.map?.triggerRepaint();
         });
       }
+    }
+    // Les tuiles de l'ancienne vue n'ont plus à passer devant celles-ci.
+    this.demCache.retainOnly(wanted);
+    // La source se décide sur l'ensemble du champ, et non sur la dernière tuile arrivée.
+    // La première tuile LiDAR sert toujours de sonde : elle débloque les zooms plus fins.
+    const source = resolveDemSource(counts, this.demSource);
+    if (source !== this.demSource) {
+      // Le zoom a été choisi avec l'ancienne source (`recomputeRegions` passe avant) :
+      // il faut le rechoisir.
+      this.demSource = source;
+      this.needsFieldRebuild = true;
+      this.map?.triggerRepaint();
     }
     return complete;
   }

@@ -78,6 +78,38 @@ function tileKey(z: number, x: number, y: number): string {
   return `${z}/${x}/${y}`;
 }
 
+/** Bilan des tuiles d'un champ de hauteur, au zoom demandé. */
+export interface DemTileCounts {
+  lidar: number;
+  terrarium: number;
+  /** Classées absentes pour de bon : le serveur n'a rien à ce zoom. */
+  absent: number;
+  /** Ni obtenues ni classées : en vol, en attente, ou refusées passagèrement. */
+  pending: number;
+}
+
+/**
+ * Source d'élévation à retenir pour choisir le zoom, d'après l'ensemble du champ.
+ *
+ * Décider sur la dernière tuile arrivée faisait osciller le zoom : un refus ponctuel du
+ * LiDAR rattrapé par terrarium, ou une vue à cheval sur la limite de couverture,
+ * suffisait à redescendre à z15, puis la tuile LiDAR suivante faisait remonter.
+ *
+ * - Une seule tuile LiDAR suffit : la couverture existe, les zooms fins sont utiles.
+ * - Sinon des tuiles terrarium, ou un champ entièrement absent (au-delà de z15 hors
+ *   couverture LiDAR) : on revient dans la plage de terrarium.
+ * - Tant que rien n'est tranché, on garde la décision précédente.
+ */
+export function resolveDemSource(
+  counts: DemTileCounts,
+  previous: DemSource | null,
+): DemSource | null {
+  if (counts.lidar > 0) return 'lidar';
+  if (counts.terrarium > 0) return 'terrarium';
+  if (counts.absent > 0 && counts.pending === 0) return 'terrarium';
+  return previous;
+}
+
 let decodeCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
 let decodeContext: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
 
@@ -124,6 +156,8 @@ function decodeTerrarium(
 export class DemTileCache {
   private tiles = new Map<string, DemTile>();
   private inFlight = new Map<string, Promise<DemTile | null>>();
+  /** Annulation propre à chaque requête en vol ou en attente, par clé de tuile. */
+  private controllers = new Map<string, AbortController>();
   private failed = new Set<string>();
   /** Incrémentée à chaque changement de source : périme les requêtes déjà en vol. */
   private generation = 0;
@@ -168,6 +202,31 @@ export class DemTileCache {
     this.tiles.clear();
     this.failed.clear();
     this.inFlight.clear();
+    for (const controller of this.controllers.values()) controller.abort();
+    this.controllers.clear();
+  }
+
+  /** Vrai si la tuile a été classée absente du serveur (océan, hors couverture). */
+  isAbsent(coord: TileCoord): boolean {
+    return this.failed.has(tileKey(coord.z, coord.x, coord.y));
+  }
+
+  /**
+   * Annule les requêtes, en vol ou en file, des tuiles qui ne sont plus demandées.
+   *
+   * Sans cela, après un déplacement rapide, la file plafonnée restait occupée par les
+   * tuiles de l'ancienne vue, téléchargées une à une avant celles de la nouvelle. Une
+   * tuile annulée n'est pas classée absente : elle repartira si on y revient.
+   */
+  retainOnly(wanted: readonly TileCoord[]): void {
+    if (this.controllers.size === 0) return;
+    const keep = new Set(wanted.map((c) => tileKey(c.z, c.x, c.y)));
+    for (const [key, controller] of this.controllers) {
+      if (keep.has(key)) continue;
+      controller.abort();
+      this.controllers.delete(key);
+      this.inFlight.delete(key);
+    }
   }
 
   get(z: number, x: number, y: number): DemTile | undefined {
@@ -192,8 +251,13 @@ export class DemTileCache {
     if (pending) return pending;
 
     const generation = this.generation;
-    const promise = this.fetchAvecPlafond(coord, signal)
+    const controller = new AbortController();
+    this.controllers.set(key, controller);
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    const promise = this.fetchAvecPlafond(coord, combined)
       .then((tile) => {
+        // Annulée entre-temps : ni en cache, ni absente, elle n'est simplement plus voulue.
+        if (combined.aborted) return null;
         // Une réponse qui arrive après un changement de source décrit l'ancien monde :
         // la mettre en cache ferait réapparaître des altitudes qu'on vient d'écarter.
         if (generation !== this.generation) return null;
@@ -207,7 +271,9 @@ export class DemTileCache {
         return null;
       })
       .finally(() => {
-        this.inFlight.delete(key);
+        // La clé peut déjà porter une requête plus récente : ne retirer que la sienne.
+        if (this.inFlight.get(key) === promise) this.inFlight.delete(key);
+        if (this.controllers.get(key) === controller) this.controllers.delete(key);
       });
 
     this.inFlight.set(key, promise);
@@ -222,12 +288,18 @@ export class DemTileCache {
    */
   private async fetchAvecPlafond(
     coord: TileCoord,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<DemTile | null> {
     // `while` et non `if` : plusieurs attentes peuvent être réveillées, chacune doit
     // revérifier qu'il reste bien un jeton pour elle.
     while (this.enCours >= MAX_REQUETES_SIMULTANEES) {
-      await new Promise<void>((resolve) => this.attente.push(resolve));
+      await this.attendreJeton(signal);
+    }
+    if (signal.aborted) {
+      // Réveillée puis annulée avant d'avoir pris le jeton : le réveil passe à la
+      // suivante, sans quoi la file resterait bloquée avec un jeton libre.
+      if (this.enCours < MAX_REQUETES_SIMULTANEES) this.attente.shift()?.();
+      throw signal.reason;
     }
     this.enCours++;
     try {
@@ -236,6 +308,30 @@ export class DemTileCache {
       this.enCours--;
       this.attente.shift()?.();
     }
+  }
+
+  /**
+   * Attend qu'un jeton se libère. Une annulation fait quitter la file sur-le-champ, sans
+   * consommer de jeton : c'est ce qui laisse passer les tuiles de la vue courante.
+   */
+  private attendreJeton(signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const abandon = () => {
+        const index = this.attente.indexOf(reveil);
+        if (index >= 0) this.attente.splice(index, 1);
+        reject(signal.reason);
+      };
+      const reveil = () => {
+        signal.removeEventListener('abort', abandon);
+        resolve();
+      };
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', abandon, { once: true });
+      this.attente.push(reveil);
+    });
   }
 
   /** Vrai tant que la limite de débit de la Géoplateforme est supposée active. */
@@ -259,7 +355,7 @@ export class DemTileCache {
    */
   private async chargerLidar(
     coord: TileCoord,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<Float32Array | null> {
     try {
       return await fetchLidarTile(coord, this.product, signal);
@@ -271,7 +367,7 @@ export class DemTileCache {
     }
   }
 
-  private async fetchTile(coord: TileCoord, signal?: AbortSignal): Promise<DemTile | null> {
+  private async fetchTile(coord: TileCoord, signal: AbortSignal): Promise<DemTile | null> {
     if (this.lidarUtilisable(coord.z)) {
       // Un refus du service est transitoire : on ne l'absorbe que si terrarium peut
       // prendre le relais. Sinon on laisse remonter, pour que la tuile soit redemandée
