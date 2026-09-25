@@ -67,7 +67,9 @@ Quelques points sensibles, détaillés dans les commentaires du code :
   pour une limite de 40), et le LiDAR mis de côté après un `429`, le temps annoncé par
   `Retry-After` ou dix secondes à défaut : la limite de débit de la Géoplateforme porte
   sur l'adresse IP, donc insister tuile par tuile ne fait que la reconduire
-  (`src/shadow/demTiles.ts`).
+  (`src/shadow/demTiles.ts`). Une tuile refusée est retentée après 2 s puis 8 s, et
+  classée absente au troisième refus : certaines emprises refusent à chaque fois, et
+  les redemander à chaque rendu partait en milliers de requêtes.
 - Les tuiles d'élévation sont **décodées sans passer par le canvas**
   (`src/shadow/png.ts`) : `createImageBitmap` + `drawImage` + `getImageData` n'est pas
   fidèle à l'octet près, et une unité du canal rouge vaut 256 mètres. Mesuré : 78 pixels

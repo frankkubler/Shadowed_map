@@ -53,6 +53,20 @@ const MAX_REQUETES_SIMULTANEES = 6;
  */
 const PAUSE_APRES_429_MS = 10_000;
 
+/**
+ * Délais avant de retenter une tuile qui a échoué, puis classement en absente.
+ *
+ * Un refus du service n'est pas classé absent d'emblée : mesuré, une requête sur huit
+ * environ repart en 400 sans raison. Mais certaines emprises refusent à chaque fois, et
+ * les redemander à chaque rendu faisait des milliers de requêtes sur les mêmes tuiles.
+ * Deux nouvelles tentatives espacées suffisent à distinguer le hasard (une chance sur
+ * cinq cents d'échouer trois fois) d'un refus durable.
+ */
+const DELAIS_NOUVELLE_TENTATIVE_MS = [2_000, 8_000];
+
+/** Échec qui ne dit rien de la tuile elle-même : pause après un 429, annulation. */
+class EchecSansRapportAvecLaTuile extends Error {}
+
 /** Plafond de la pause, quel que soit le `Retry-After` annoncé. */
 const PAUSE_MAX_MS = 60_000;
 
@@ -173,6 +187,8 @@ export class DemTileCache {
   /** Annulation propre à chaque requête en vol ou en attente, par clé de tuile. */
   private controllers = new Map<string, AbortController>();
   private failed = new Set<string>();
+  /** Tuiles en échec passager : nombre d'échecs et instant de la prochaine tentative. */
+  private echecs = new Map<string, { nombre: number; reprise: number }>();
   /** Incrémentée à chaque changement de source : périme les requêtes déjà en vol. */
   private generation = 0;
   /** Requêtes réseau en cours, et files d'attente des suivantes. */
@@ -217,6 +233,7 @@ export class DemTileCache {
     this.generation++;
     this.tiles.clear();
     this.failed.clear();
+    this.echecs.clear();
     this.inFlight.clear();
     for (const controller of this.controllers.values()) controller.abort();
     this.controllers.clear();
@@ -225,6 +242,15 @@ export class DemTileCache {
   /** Vrai si la tuile a été classée absente du serveur (océan, hors couverture). */
   isAbsent(coord: TileCoord): boolean {
     return this.failed.has(tileKey(coord.z, coord.x, coord.y));
+  }
+
+  /**
+   * Délai avant la prochaine tentative d'une tuile en échec passager, `null` si elle
+   * n'est pas en échec. Sert à l'appelant pour redemander un rendu au bon moment.
+   */
+  delaiAvantNouvelleTentative(coord: TileCoord): number | null {
+    const echec = this.echecs.get(tileKey(coord.z, coord.x, coord.y));
+    return echec ? Math.max(0, echec.reprise - Date.now()) : null;
   }
 
   /**
@@ -262,6 +288,8 @@ export class DemTileCache {
     const cached = this.tiles.get(key);
     if (cached) return cached;
     if (this.failed.has(key)) return null;
+    const echec = this.echecs.get(key);
+    if (echec && Date.now() < echec.reprise) return null;
 
     const pending = this.inFlight.get(key);
     if (pending) return pending;
@@ -277,13 +305,24 @@ export class DemTileCache {
         // Une réponse qui arrive après un changement de source décrit l'ancien monde :
         // la mettre en cache ferait réapparaître des altitudes qu'on vient d'écarter.
         if (generation !== this.generation) return null;
+        this.echecs.delete(key);
         if (tile) this.insert(key, tile);
         else this.failed.add(key);
         return tile;
       })
-      .catch(() => {
-        // Un échec réseau ne doit pas être définitif : on ne marque pas la tuile
-        // comme absente, elle sera retentée au prochain déplacement.
+      .catch((erreur: unknown) => {
+        // Un échec n'est pas définitif d'emblée : la tuile est retentée après un délai,
+        // puis classée absente si elle refuse encore. Une annulation, une pause après
+        // 429 ou un changement de source ne disent rien d'elle : on n'en tient pas compte.
+        if (
+          combined.aborted ||
+          generation !== this.generation ||
+          erreur instanceof EchecSansRapportAvecLaTuile ||
+          (erreur instanceof LidarHttpError && erreur.status === 429)
+        ) {
+          return null;
+        }
+        this.noterEchec(key);
         return null;
       })
       .finally(() => {
@@ -294,6 +333,18 @@ export class DemTileCache {
 
     this.inFlight.set(key, promise);
     return promise;
+  }
+
+  /** Compte un échec de plus pour cette tuile ; au-delà des délais prévus, elle est absente. */
+  private noterEchec(key: string): void {
+    const nombre = (this.echecs.get(key)?.nombre ?? 0) + 1;
+    const delai = DELAIS_NOUVELLE_TENTATIVE_MS[nombre - 1];
+    if (delai === undefined) {
+      this.echecs.delete(key);
+      this.failed.add(key);
+      return;
+    }
+    this.echecs.set(key, { nombre, reprise: Date.now() + delai });
   }
 
   /**
@@ -398,7 +449,7 @@ export class DemTileCache {
     await this.attendreCreneauLidar(signal);
     // Un 429 a pu tomber pendant l'attente : partir quand même prolongerait le blocage.
     // Lever — et non renvoyer `null` — pour que la tuile ne soit pas classée absente.
-    if (this.lidarEnPause()) throw new Error('LiDAR IGN : en pause après un 429');
+    if (this.lidarEnPause()) throw new EchecSansRapportAvecLaTuile('LiDAR IGN : en pause après un 429');
     try {
       return await fetchLidarTile(coord, this.product, signal);
     } catch (erreur) {
@@ -434,7 +485,7 @@ export class DemTileCache {
       // il n'a simplement pas été interrogé. Lever plutôt que renvoyer `null` est
       // capital — `null` la ferait classer absente pour de bon par `load`, et le trou
       // survivrait très largement à la limite de débit qui l'a causé.
-      if (this.lidarEnPause()) throw new Error('LiDAR IGN : en pause après un 429');
+      if (this.lidarEnPause()) throw new EchecSansRapportAvecLaTuile('LiDAR IGN : en pause après un 429');
       return null;
     }
 

@@ -85,6 +85,8 @@ describe('source d’élévation', () => {
   // faire classer la tuile comme absente là où terrarium ne peut pas prendre le relais,
   // sinon le trou serait définitif.
   it('laisse remonter un refus au-delà du zoom de terrarium', async () => {
+    let maintenant = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => maintenant);
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response('<ServiceException/>', { status: 400 })),
@@ -93,8 +95,11 @@ describe('source d’élévation', () => {
     const cache = new DemTileCache();
     const coord = { z: 17, x: 68037, y: 46670 };
     expect(await cache.load(coord)).toBeNull();
+    expect(cache.isAbsent(coord)).toBe(false);
 
-    // la tuile n'est pas mise sur liste noire : un nouvel essai repart bien en requête
+    // la tuile n'est pas mise sur liste noire : passé son délai, un nouvel essai repart
+    // bien en requête
+    maintenant += 2_500;
     const appels: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -105,6 +110,60 @@ describe('source d’élévation', () => {
     );
     expect((await cache.load(coord))?.source).toBe('lidar');
     expect(appels).not.toHaveLength(0);
+  });
+
+  // Certaines emprises refusent à chaque fois : les redemander à chaque rendu faisait des
+  // milliers de requêtes sur les mêmes tuiles.
+  it('espace les nouvelles tentatives puis classe absente une tuile toujours refusée', async () => {
+    let maintenant = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => maintenant);
+    const appels: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        appels.push(url);
+        return new Response('<ServiceException/>', { status: 400 });
+      }),
+    );
+
+    const cache = new DemTileCache();
+    const coord = { z: 17, x: 68037, y: 46670 };
+    expect(await cache.load(coord)).toBeNull();
+    expect(appels).toHaveLength(1);
+
+    // Pendant le délai, aucune requête : c'est ce qui casse la boucle.
+    for (let i = 0; i < 50; i++) await cache.load(coord);
+    expect(appels).toHaveLength(1);
+    expect(cache.delaiAvantNouvelleTentative(coord)).toBe(2_000);
+
+    maintenant += 2_001;
+    await cache.load(coord);
+    expect(appels).toHaveLength(2);
+
+    maintenant += 8_001;
+    await cache.load(coord);
+    expect(appels).toHaveLength(3);
+    expect(cache.isAbsent(coord)).toBe(true);
+
+    // Absente : plus jamais redemandée.
+    maintenant += 60_000;
+    await cache.load(coord);
+    expect(appels).toHaveLength(3);
+  });
+
+  it('ne compte pas une limite de débit comme un refus de la tuile', async () => {
+    let maintenant = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => maintenant);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 429 })));
+
+    const cache = new DemTileCache();
+    const coord = { z: 17, x: 68037, y: 46670 };
+    for (let i = 0; i < 5; i++) {
+      await cache.load(coord);
+      maintenant += 11_000;
+    }
+    expect(cache.isAbsent(coord)).toBe(false);
+    expect(cache.delaiAvantNouvelleTentative(coord)).toBeNull();
   });
 
   // Terrarium s'arrête au zoom 15 : au-delà, mieux vaut pas de tuile qu'une tuile étirée.

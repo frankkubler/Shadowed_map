@@ -136,6 +136,9 @@ export class ShadowLayer implements CustomLayerInterface {
   /** Source de la dernière tuile obtenue : décide du zoom exploitable. */
   private demSource: DemSource | null = null;
   private needsMaskRender = true;
+  /** Rendu programmé pour retenter les tuiles en échec passager. */
+  private tentativePrevue: { echeance: number; minuteur: ReturnType<typeof setTimeout> } | null =
+    null;
 
   private sweep: {
     dates: Date[];
@@ -336,6 +339,8 @@ export class ShadowLayer implements CustomLayerInterface {
 
   onRemove(): void {
     this.map?.off('move', this.handleMove);
+    if (this.tentativePrevue !== null) clearTimeout(this.tentativePrevue.minuteur);
+    this.tentativePrevue = null;
     this.buildingProvider.cancel();
     this.field?.dispose();
     this.pass?.dispose();
@@ -569,9 +574,14 @@ export class ShadowLayer implements CustomLayerInterface {
         }
         counts.pending++;
         void this.demCache.load(coord).then((tile) => {
-          // Un échec passager ou une annulation ne déclenche rien : la tuile repartira au
-          // prochain rendu. Relancer ici tournerait en boucle, une frame après l'autre.
-          if (!tile && !this.demCache.isAbsent(coord)) return;
+          if (!tile && !this.demCache.isAbsent(coord)) {
+            // Échec passager : la tuile ne sera retentée qu'après son délai. On demande
+            // un rendu à ce moment-là, sans quoi elle attendrait le prochain déplacement.
+            // Relancer tout de suite tournerait en boucle, une frame après l'autre.
+            const delai = this.demCache.delaiAvantNouvelleTentative(coord);
+            if (delai !== null) this.planifierNouvelleTentative(delai);
+            return;
+          }
           // Une tuile obtenue ou classée absente peut changer la source retenue, donc le
           // zoom : le bilan est refait au prochain rendu, sur tout le champ.
           this.needsFieldRebuild = true;
@@ -592,6 +602,20 @@ export class ShadowLayer implements CustomLayerInterface {
       this.map?.triggerRepaint();
     }
     return complete;
+  }
+
+  /** Un seul minuteur pour toutes les tuiles en attente : le plus proche l'emporte. */
+  private planifierNouvelleTentative(delaiMs: number): void {
+    const echeance = Date.now() + delaiMs;
+    if (this.tentativePrevue !== null && this.tentativePrevue.echeance <= echeance) return;
+    if (this.tentativePrevue !== null) clearTimeout(this.tentativePrevue.minuteur);
+    this.tentativePrevue = {
+      echeance,
+      minuteur: setTimeout(() => {
+        this.tentativePrevue = null;
+        this.map?.triggerRepaint();
+      }, delaiMs + 50),
+    };
   }
 
   private buildMarchParams(
