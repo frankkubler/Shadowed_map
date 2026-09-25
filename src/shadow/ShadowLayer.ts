@@ -15,7 +15,7 @@ import {
   mercatorYToLat,
   type Bounds,
 } from '../sun/mercator';
-import { isDaylight, sunDirection, sunPosition, MIN_USEFUL_ALTITUDE_RAD } from '../sun/sun';
+import { isDaylight, sameLocalDay, sunDirection, sunPosition, MIN_USEFUL_ALTITUDE_RAD } from '../sun/sun';
 import { createBuildingProvider, EMPTY_MESH, MIN_BUILDING_ZOOM, type BuildingResult } from './buildings';
 import type { DemSource } from './demTiles';
 import type { LidarProduct } from './lidarIgn';
@@ -174,11 +174,12 @@ export class ShadowLayer implements CustomLayerInterface {
 
   setDate(date: Date): void {
     if (date.getTime() === this.date.getTime()) return;
+    // L'ensoleillement cumule toute la journée : seul un changement de jour le périme.
+    // Le relancer à chaque minute — le pas de l'horloge temps réel — masquait la couche
+    // le temps du recalcul, pour un résultat identique.
+    if (!sameLocalDay(date, this.date)) this.exposureDirty = true;
     this.date = date;
     this.needsMaskRender = true;
-    // La marge de la région dépend de la hauteur du soleil : un grand saut d'heure
-    // peut la rendre insuffisante, d'où la reconstruction quand la direction change.
-    this.exposureDirty = true;
     this.map?.triggerRepaint();
   }
 
@@ -187,6 +188,8 @@ export class ShadowLayer implements CustomLayerInterface {
     this.mode = mode;
     this.exposureDirty = true;
     this.needsMaskRender = true;
+    // La forme de la marge dépend du mode (voir `prerender`) : le champ est à refaire.
+    this.needsFieldRebuild = true;
     this.map?.triggerRepaint();
   }
 
@@ -367,10 +370,12 @@ export class ShadowLayer implements CustomLayerInterface {
     const outsideField = !this.fieldRegion || !regionContains(this.fieldRegion, visible);
 
     // Pendant un balayage la direction du soleil change à chaque instant : la laisser
-    // déclencher une reconstruction du champ rendrait le calcul interminable.
-    const sweeping = this.sweep !== null;
-    if ((sunMoved && !sweeping) || outsideField || this.needsFieldRebuild) {
-      this.recomputeRegions(visible, sun.altitude, texelDir, sweeping);
+    // déclencher une reconstruction du champ rendrait le calcul interminable. Le mode
+    // ensoleillement est dans le même cas — il parcourt toute la journée, donc tout le
+    // tour de l'horizon — et une reconstruction y relançait l'accumulation.
+    const allDay = this.sweep !== null || this.mode === 'exposure';
+    if ((sunMoved && !allDay) || outsideField || this.needsFieldRebuild) {
+      this.recomputeRegions(visible, sun.altitude, texelDir, allDay);
       this.lastSunDir = texelDir;
       this.needsFieldRebuild = true;
     }

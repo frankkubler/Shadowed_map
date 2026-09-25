@@ -52,7 +52,7 @@ Quelques points sensibles, détaillés dans les commentaires du code :
 - Le champ est **carré en Mercator**, ce qui rend l'espace texel isotrope et évite toute
   correction d'aspect dans le shader (`src/shadow/region.ts`).
 - La marge du champ s'étend **uniquement du côté du soleil** (sauf pendant un balayage
-  horaire, voir plus bas), et est plafonnée : sans cela elle diverge au lever et au
+  horaire ou en mode ensoleillement, voir plus bas), et est plafonnée : sans cela elle diverge au lever et au
   coucher.
 - Le pas de marche **croît géométriquement** : fin près du point de départ pour attraper
   les ombres de bâtiments, grossier au loin pour les crêtes (`src/shadow/raymarch.ts`).
@@ -84,7 +84,8 @@ Les terrasses et le profil GPX reposent sur la même brique (`src/shadow/ShadowL
 - `sweepTimes` rejoue le lancer de rayon pour une série d'instants, quelques-uns par
   frame, dans **un masque distinct de celui affiché** — sans quoi un balayage laisserait
   l'écran sur le dernier instant calculé.
-- Pendant un balayage, la marge du champ de hauteur devient **omnidirectionnelle**. Le
+- Pendant un balayage, comme en mode heures d'ensoleillement, la marge du champ de
+  hauteur devient **omnidirectionnelle**. Le
   soleil fait le tour de l'horizon dans la journée : une marge posée pour le matin
   manquerait les obstacles de l'ouest en fin d'après-midi, et l'erreur serait invisible
   puisqu'une ombre manquante ressemble à du soleil.
