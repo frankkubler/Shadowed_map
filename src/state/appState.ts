@@ -20,6 +20,17 @@ export interface AppState {
 
 type Listener = (state: AppState, changed: ReadonlySet<keyof AppState>) => void;
 
+/**
+ * Intervalle minimal entre deux écritures du hash.
+ *
+ * Chrome bride `history.replaceState` au-delà d'une centaine d'appels en quelques
+ * secondes (« Throttling navigation to prevent the browser from hanging ») : écrire à
+ * chaque frame, comme pendant l'animation de la journée, déclenchait ce garde-fou. Le
+ * lien n'a besoin d'être à jour qu'au moment où on le copie — quelques écritures par
+ * seconde suffisent largement.
+ */
+export const HASH_WRITE_INTERVAL_MS = 250;
+
 /** Chamonix — un bon défaut pour une carte d'ombres : relief marqué et vallée encaissée. */
 export const DEFAULT_STATE: AppState = {
   lat: 45.9237,
@@ -90,6 +101,8 @@ export class Store {
   private state: AppState;
   private listeners = new Set<Listener>();
   private hashWriteScheduled = false;
+  /** Instant de la dernière écriture du hash, pour en espacer les suivantes. */
+  private lastHashWriteAt = -Infinity;
   /** Évite de réagir au `hashchange` que l'on vient soi-même de provoquer. */
   private lastWrittenHash = '';
 
@@ -126,18 +139,23 @@ export class Store {
   }
 
   /**
-   * L'écriture du hash est repoussée à la frame suivante : pendant un déplacement de
-   * carte ou un glissement de slider, l'état change à chaque frame et `replaceState`
-   * est trop coûteux pour être appelé aussi souvent.
+   * L'écriture du hash est différée et espacée d'au moins `HASH_WRITE_INTERVAL_MS` :
+   * pendant un déplacement de carte, un glissement de slider ou l'animation, l'état
+   * change à chaque frame. Les changements intermédiaires sont fusionnés — seul l'état
+   * au moment de l'écriture compte, et le dernier finit toujours par être écrit.
    */
   private scheduleHashWrite(): void {
     if (this.hashWriteScheduled || typeof window === 'undefined') return;
     this.hashWriteScheduled = true;
-    requestAnimationFrame(() => {
+    const delay = Math.max(0, this.lastHashWriteAt + HASH_WRITE_INTERVAL_MS - Date.now());
+    setTimeout(() => {
       this.hashWriteScheduled = false;
-      this.lastWrittenHash = serializeState(this.state);
-      history.replaceState(null, '', `#${this.lastWrittenHash}`);
-    });
+      this.lastHashWriteAt = Date.now();
+      const hash = serializeState(this.state);
+      if (hash === this.lastWrittenHash) return;
+      this.lastWrittenHash = hash;
+      history.replaceState(null, '', `#${hash}`);
+    }, delay);
   }
 
   /** Prend en compte les navigations arrière/avant et les liens collés à la main. */
