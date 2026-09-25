@@ -18,6 +18,7 @@ import type { LngLatPoint, ShadowLayer } from '../shadow/ShadowLayer';
 import { sunTimes } from '../sun/sun';
 import { formatTime } from './format';
 import { stateColors } from './palette';
+import { buildTerracePopup, sweepOutcomes, sweepStillValid } from './terraceSweep';
 
 const SOURCE = 'terraces';
 const LAYER_LIKELY = 'terraces-likely';
@@ -79,17 +80,25 @@ export function createTerracesUi({
   let status: TerraceResult['status'] = 'disabled';
   let enabled = false;
   let sweeping = false;
+  /** Instant de départ du dernier balayage appliqué, `null` s'il n'y en a pas de valide. */
+  let sweptFrom: Date | null = null;
 
   // Attention : ce rappel peut être déclenché dès la construction du provider. Il ne
   // doit donc toucher à rien qui soit déclaré plus bas dans cette fonction.
   const provider = createTerraceProvider((result) => {
     status = result.status;
-    rows = (result.data ?? NO_TERRACES).map((terrace) => ({
-      terrace,
-      state: 'unknown' as SunState,
-      sunUntil: null,
-      sunlitUntilSunset: false,
-    }));
+    // Une terrasse déjà balayée garde son horaire quand la liste est rechargée : il ne
+    // dépend que de sa position et de l'heure, pas de la vue.
+    const previous = new Map(rows.map((row) => [row.terrace.id, row]));
+    rows = (result.data ?? NO_TERRACES).map((terrace) => {
+      const known = previous.get(terrace.id);
+      return {
+        terrace,
+        state: 'unknown' as SunState,
+        sunUntil: known?.sunUntil ?? null,
+        sunlitUntilSunset: known?.sunlitUntilSunset ?? false,
+      };
+    });
     refresh();
   });
 
@@ -163,7 +172,11 @@ export function createTerracesUi({
     if (row.state === 'unknown') return 'relief inconnu';
     if (row.state === 'shade') return 'à l’ombre';
     if (row.sunlitUntilSunset) return 'au soleil jusqu’au coucher';
-    if (row.sunUntil) return `au soleil jusqu’à ${formatTime(row.sunUntil)}`;
+    // Horaire dépassé alors que le masque dit encore soleil : les deux calculs n'ont pas
+    // la même résolution, on n'affiche pas un horaire déjà démenti par l'heure.
+    if (row.sunUntil && row.sunUntil.getTime() >= currentDate().getTime()) {
+      return `au soleil jusqu’à ${formatTime(row.sunUntil)}`;
+    }
     return 'au soleil';
   };
 
@@ -233,11 +246,7 @@ export function createTerracesUi({
           map.flyTo({ center: [row.terrace.lng, row.terrace.lat], zoom: Math.max(map.getZoom(), 17) });
           new Popup({ closeButton: true, maxWidth: '240px' })
             .setLngLat([row.terrace.lng, row.terrace.lat])
-            .setHTML(
-              `<div class="point-popup"><h2>${row.terrace.name}</h2>` +
-                `<dl><dt>Type</dt><dd>${row.terrace.kind}</dd>` +
-                `<dt>État</dt><dd>${describe(row)}</dd></dl></div>`,
-            )
+            .setDOMContent(buildTerracePopup(document, row.terrace, describe(row)))
             .addTo(map);
         });
 
@@ -280,6 +289,9 @@ export function createTerracesUi({
     sweepButton.disabled = true;
     onBusy(true);
 
+    // Les identifiants sont figés au lancement : `rows` peut être remplacé pendant le
+    // balayage, et le résultat ne doit s'appliquer qu'aux terrasses effectivement balayées.
+    const ids = rows.map((r) => r.terrace.id);
     const points: LngLatPoint[] = rows.map((r) => ({ lng: r.terrace.lng, lat: r.terrace.lat }));
     const { sunlit } = await shadowLayer.sweepTimes(dates, points);
 
@@ -289,28 +301,19 @@ export function createTerracesUi({
     // Un balayage annulé par un plus récent renvoie un résultat vide : ne rien écraser.
     if (sunlit.length === 0) return;
 
-    rows.forEach((row, index) => {
+    const outcomes = sweepOutcomes(ids, dates, sunlit);
+    sweptFrom = now;
+    for (const row of rows) {
+      const outcome = outcomes.get(row.terrace.id);
+      if (!outcome) continue;
       // Le balayage reconstruit le champ avec une marge omnidirectionnelle, donc à une
       // résolution un peu différente du masque affiché. Pour ne pas afficher « au
       // soleil » à côté d'un horaire qui dit le contraire, c'est le balayage qui fait
       // foi une fois lancé : son premier instant est l'heure courante.
-      const atDeparture = sunlit[0]?.[index];
-      if (atDeparture !== null && atDeparture !== undefined) {
-        row.state = atDeparture ? 'sun' : 'shade';
-      }
-
-      let last: Date | null = null;
-      let stillSunlit = true;
-      for (let t = 0; t < sunlit.length; t++) {
-        if (sunlit[t]?.[index] === true) last = dates[t] ?? last;
-        else if (last !== null) {
-          stillSunlit = false;
-          break;
-        }
-      }
-      row.sunUntil = last;
-      row.sunlitUntilSunset = last !== null && stillSunlit;
-    });
+      if (outcome.atStart !== null) row.state = outcome.atStart ? 'sun' : 'shade';
+      row.sunUntil = outcome.sunUntil;
+      row.sunlitUntilSunset = outcome.sunlitUntilSunset;
+    }
 
     pushToMap();
     renderList();
@@ -343,10 +346,14 @@ export function createTerracesUi({
     /** À appeler quand l'heure change : l'état soleil/ombre a bougé, pas la liste. */
     refreshStates(): void {
       if (!enabled) return;
-      // Les horaires calculés valaient pour l'ancienne heure de référence.
-      for (const row of rows) {
-        row.sunUntil = null;
-        row.sunlitUntilSunset = false;
+      // Les horaires restent justes tant qu'on avance dans la journée balayée — ce que
+      // fait l'horloge temps réel à chaque minute. Hors de cette plage, ils sont périmés.
+      if (!sweepStillValid(sweptFrom, currentDate())) {
+        sweptFrom = null;
+        for (const row of rows) {
+          row.sunUntil = null;
+          row.sunlitUntilSunset = false;
+        }
       }
       refresh();
     },

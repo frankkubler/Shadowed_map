@@ -9,6 +9,17 @@ const satureee = (retryAfter?: string) =>
     headers: retryAfter ? { 'Retry-After': retryAfter } : undefined,
   });
 
+/**
+ * Miroir qui accepte la connexion puis ne répond jamais — comme un vrai `fetch`, il ne
+ * rejette qu'à l'annulation du signal.
+ */
+const muet = (init?: { signal?: AbortSignal }) =>
+  new Promise<Response>((_, reject) => {
+    init?.signal?.addEventListener('abort', () =>
+      reject(new DOMException('Aborted', 'AbortError')),
+    );
+  });
+
 describe('requêtes Overpass', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -86,6 +97,59 @@ describe('requêtes Overpass', () => {
     appels.length = 0;
     await runOverpassQuery('[out:json];', new AbortController().signal);
     expect(appels.some((u) => u.includes('overpass-api.de'))).toBe(true);
+  });
+
+  // Un miroir muet est plus nuisible qu'un miroir qui refuse : sans délai propre, il
+  // bloquait toute la rotation, les suivants n'étaient jamais essayés et la couche
+  // restait vide sans qu'aucune erreur ne remonte. Mesuré sur overpass.kumi.systems.
+  it('passe au miroir suivant quand un miroir reste muet', async () => {
+    const appels: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: { signal?: AbortSignal }) => {
+        appels.push(url);
+        if (url.includes('kumi')) return muet(init);
+        return Promise.resolve(url.includes('overpass-api.de') ? satureee() : ok());
+      }),
+    );
+
+    const promesse = runOverpassQuery('[out:json];', new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expect(promesse).resolves.toEqual([]);
+
+    expect(appels.some((u) => u.includes('kumi'))).toBe(true);
+    expect(appels.some((u) => u.includes('osm.ch'))).toBe(true);
+  });
+
+  // Le délai ne suffit pas : il faut aussi retenir le miroir fautif, sans quoi chaque
+  // requête le reperd, et un déplacement de carte annule la tentative avant qu'elle
+  // n'atteigne un miroir valide.
+  it('met un miroir muet à l’écart au lieu de reperdre le délai', async () => {
+    let kumiSature = false;
+    const appels: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: { signal?: AbortSignal }) => {
+        appels.push(url);
+        if (url.includes('overpass-api.de')) return muet(init);
+        if (url.includes('kumi')) return Promise.resolve(kumiSature ? satureee() : ok());
+        return Promise.resolve(satureee());
+      }),
+    );
+
+    const premier = runOverpassQuery('[out:json];', new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await premier;
+    expect(appels.some((u) => u.includes('overpass-api.de'))).toBe(true);
+
+    // Les deux autres miroirs deviennent saturés : la rotation repasserait par le
+    // miroir muet s'il n'avait pas été mis à l'écart.
+    kumiSature = true;
+    appels.length = 0;
+    await expect(
+      runOverpassQuery('[out:json];', new AbortController().signal),
+    ).rejects.toThrow();
+    expect(appels.some((u) => u.includes('overpass-api.de'))).toBe(false);
   });
 
   it('échoue proprement quand tous les miroirs sont saturés', async () => {

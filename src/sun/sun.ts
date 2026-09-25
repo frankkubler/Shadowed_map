@@ -103,3 +103,12 @@ export function compassLabel(azimuth: number): string {
   const index = Math.round(azimuthFromNorthDeg(azimuth) / 22.5) % 16;
   return points[index] ?? 'N';
 }
+
+/** Même jour calendaire, dans le fuseau du navigateur. */
+export function sameLocalDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}

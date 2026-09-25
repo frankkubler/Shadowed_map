@@ -20,6 +20,7 @@ import {
 import type { LngLatPoint, ShadowLayer } from '../shadow/ShadowLayer';
 import { renderProfile, type ProfileColors, type ProfileSample, type SegmentState } from './trackProfile';
 import { formatDuration, formatTime } from './format';
+import { sameLocalDay } from '../sun/sun';
 
 const SOURCE = 'track';
 const LAYER = 'track-line';
@@ -123,6 +124,8 @@ export function createTrackUi(options: TrackUiOptions) {
   let states: SegmentState[] = [];
   let recomputeTimer: ReturnType<typeof setTimeout> | null = null;
   let computing = false;
+  /** Jour sur lequel portait le dernier calcul : les heures de passage en dépendent. */
+  let computedDay: Date | null = null;
   /** Note sur l'origine des heures de passage, réaffichée après chaque calcul. */
   let sourceNote = '';
 
@@ -310,11 +313,19 @@ export function createTrackUi(options: TrackUiOptions) {
 
   /** Relance le calcul complet : temps de passage, balayage, carte, profil, statistiques. */
   const recompute = async () => {
-    if (!track || !sampled || computing) return;
+    if (!track || !sampled) return;
+    // Une demande arrivée pendant un calcul n'est pas abandonnée : elle repasse après,
+    // sans quoi un changement de jour survenu entre-temps ne serait jamais pris en compte.
+    if (computing) {
+      scheduleRecompute();
+      return;
+    }
 
+    const departure = departureDate();
+    computedDay = departure;
     const times = passageTimes(
       { ...track, points: sampled.points, cumulative: sampled.cumulative },
-      departureDate(),
+      departure,
       speed(),
     );
     const { dates, indexOf } = buildBuckets(times);
@@ -330,7 +341,10 @@ export function createTrackUi(options: TrackUiOptions) {
     onBusy(false);
 
     // Balayage remplacé par un plus récent : le résultat en cours n'a plus d'intérêt.
-    if (sunlit.length === 0) return;
+    if (sunlit.length === 0) {
+      computedDay = null;
+      return;
+    }
 
     states = points.map((_, i) => {
       const value = sunlit[indexOf[i] ?? 0]?.[i];
@@ -392,6 +406,7 @@ export function createTrackUi(options: TrackUiOptions) {
 
   const clear = () => {
     track = null;
+    computedDay = null;
     sampled = null;
     states = [];
     delete root.dataset['loaded'];
@@ -434,9 +449,16 @@ export function createTrackUi(options: TrackUiOptions) {
 
   return {
     installLayers,
-    /** À appeler quand la date change : les heures de passage sont relatives à ce jour. */
+    /**
+     * À appeler quand la date change. Les heures de passage ne dépendent que du jour et de
+     * l'heure de départ saisie : un changement d'heure dans la même journée — l'horloge
+     * temps réel en fait un par minute — ne change rien au profil, et relancerait pour
+     * rien un balayage complet.
+     */
     onDateChange(): void {
-      if (track) scheduleRecompute();
+      if (!track) return;
+      if (computedDay && sameLocalDay(computedDay, currentDate())) return;
+      scheduleRecompute();
     },
     hasTrack: () => track !== null,
   };

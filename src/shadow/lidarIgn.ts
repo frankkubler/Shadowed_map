@@ -48,6 +48,39 @@ export const IGN_TILE_SIZE = 256;
  */
 export const IGN_MAX_ZOOM = 18;
 
+/**
+ * En dessous de ce zoom, le LiDAR ne sert plus à rien et coûte cher.
+ *
+ * Une tuile de 256 px couvre 78 km de côté à z9, soit 306 m par texel : le service doit
+ * rééchantillonner une emprise énorme pour produire une valeur que terrarium, au pas de
+ * 3 m, donne à l'identique. Tout ce qui fait l'intérêt du LiDAR — la finesse, et le
+ * sursol du MNS — a disparu dans la moyenne bien avant.
+ *
+ * À z13 un texel vaut environ 13 m à nos latitudes : c'est la limite en dessous de
+ * laquelle un bâtiment ne pèse plus un texel entier. Mesuré : sans cette borne, une vue
+ * large sur la France lance des centaines de requêtes réparties de z9 à z15, et la
+ * Géoplateforme répond en 429.
+ *
+ * La borne reste sous `TERRARIUM_MAX_ZOOM` (15), ce qui laisse une plage où les deux
+ * sources coexistent : la première tuile LiDAR obtenue y sert de sonde de couverture et
+ * débloque les zooms plus fins.
+ */
+export const IGN_MIN_ZOOM = 13;
+
+/**
+ * Refus du service, avec son code.
+ *
+ * Le code importe : un 429 est une limite de débit, qui vaut pour toutes les requêtes à
+ * venir et demande de lever le pied, alors qu'un 400 sporadique ne concerne que cette
+ * tuile-là et se retente aussitôt.
+ */
+export class LidarHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`LiDAR IGN : réponse ${status}`);
+    this.name = 'LidarHttpError';
+  }
+}
+
 /** Emprise d'une tuile de la grille web, en EPSG:3857. */
 export function tileBounds3857(coord: TileCoord): [number, number, number, number] {
   const span = (2 * MERCATOR_EXTENT) / Math.pow(2, coord.z);
@@ -97,8 +130,9 @@ export function decodeBil32(buffer: ArrayBuffer, size = IGN_TILE_SIZE): Float32A
 /**
  * Charge une tuile d'élévation LiDAR.
  *
- * Renvoie `null` quand la zone n'est pas couverte : c'est un fait durable, l'appelant
- * peut se rabattre sur terrarium une fois pour toutes. En revanche un refus du service
+ * Renvoie `null` quand la zone n'est pas couverte, ou quand le zoom sort des bornes
+ * utiles : c'est un fait durable, l'appelant peut se rabattre sur terrarium une fois
+ * pour toutes. En revanche un refus du service
  * **lève**, et c'est délibéré : mesuré, une requête sur huit environ repart en 400 sans
  * raison apparente. Confondre ce hasard avec une absence de données ferait renoncer
  * définitivement à une tuile qui existe — et laisserait un trou dans le champ aux zooms
@@ -109,11 +143,11 @@ export async function fetchLidarTile(
   product: LidarProduct,
   signal?: AbortSignal,
 ): Promise<Float32Array | null> {
-  if (coord.z > IGN_MAX_ZOOM) return null;
+  if (coord.z > IGN_MAX_ZOOM || coord.z < IGN_MIN_ZOOM) return null;
 
   const response = await fetch(lidarTileUrl(coord, product), { signal, mode: 'cors' });
   if (!response.ok) {
-    throw new Error(`LiDAR IGN : réponse ${response.status}`);
+    throw new LidarHttpError(response.status);
   }
 
   // Le service signale certaines erreurs en XML, avec un code 200.

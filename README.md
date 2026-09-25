@@ -52,13 +52,20 @@ Quelques points sensibles, détaillés dans les commentaires du code :
 - Le champ est **carré en Mercator**, ce qui rend l'espace texel isotrope et évite toute
   correction d'aspect dans le shader (`src/shadow/region.ts`).
 - La marge du champ s'étend **uniquement du côté du soleil** (sauf pendant un balayage
-  horaire, voir plus bas), et est plafonnée : sans cela elle diverge au lever et au
+  horaire ou en mode ensoleillement, voir plus bas), et est plafonnée : sans cela elle diverge au lever et au
   coucher.
 - Le pas de marche **croît géométriquement** : fin près du point de départ pour attraper
   les ombres de bâtiments, grossier au loin pour les crêtes (`src/shadow/raymarch.ts`).
 - Le zoom d'élévation exploitable dépend de la **source** : terrarium dérive de données
   à 25–30 m et s'arrête tôt, le LiDAR descend à 50 cm. Le nombre de tuiles par vue
   reste **plafonné**, ce qui borne les requêtes quelle que soit la source.
+- Le LiDAR n'est demandé que dans une **fenêtre de zoom** (`src/shadow/lidarIgn.ts`) :
+  au-dessus de z18 il n'apporte plus rien, en dessous de z13 non plus, puisqu'une tuile
+  de 256 px couvre alors des dizaines de kilomètres et que le service doit rééchantillonner
+  une emprise énorme pour un résultat que terrarium donne à l'identique. Les requêtes
+  sont par ailleurs **menées six par six**, et le LiDAR mis de côté trente secondes
+  après un `429` : la limite de débit de la Géoplateforme porte sur l'adresse IP, donc
+  insister tuile par tuile ne fait que la reconduire (`src/shadow/demTiles.ts`).
 - Les tuiles d'élévation sont **décodées sans passer par le canvas**
   (`src/shadow/png.ts`) : `createImageBitmap` + `drawImage` + `getImageData` n'est pas
   fidèle à l'octet près, et une unité du canal rouge vaut 256 mètres. Mesuré : 78 pixels
@@ -77,7 +84,8 @@ Les terrasses et le profil GPX reposent sur la même brique (`src/shadow/ShadowL
 - `sweepTimes` rejoue le lancer de rayon pour une série d'instants, quelques-uns par
   frame, dans **un masque distinct de celui affiché** — sans quoi un balayage laisserait
   l'écran sur le dernier instant calculé.
-- Pendant un balayage, la marge du champ de hauteur devient **omnidirectionnelle**. Le
+- Pendant un balayage, comme en mode heures d'ensoleillement, la marge du champ de
+  hauteur devient **omnidirectionnelle**. Le
   soleil fait le tour de l'horizon dans la journée : une marge posée pour le matin
   manquerait les obstacles de l'ouest en fin d'après-midi, et l'erreur serait invisible
   puisqu'une ombre manquante ressemble à du soleil.
