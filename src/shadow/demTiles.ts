@@ -51,7 +51,21 @@ const MAX_REQUETES_SIMULTANEES = 6;
  * refus n'est délibérément pas mémorisé tuile par tuile (voir `load`) — la limite se
  * nourrit alors d'elle-même.
  */
-const PAUSE_APRES_429_MS = 30_000;
+const PAUSE_APRES_429_MS = 10_000;
+
+/** Plafond de la pause, quel que soit le `Retry-After` annoncé. */
+const PAUSE_MAX_MS = 60_000;
+
+/**
+ * Intervalle minimal entre deux requêtes LiDAR.
+ *
+ * La Géoplateforme limite le WMS-Raster à 40 requêtes par seconde et par IP. Plafonner le
+ * nombre de requêtes simultanées ne borne pas ce débit : six requêtes qui répondent en
+ * 100 ms en font déjà 60 par seconde, et chaque zoom à la molette relance une rafale.
+ * 50 ms donnent 20 requêtes par seconde, soit une marge de moitié — pour un deuxième
+ * onglet ouvert, ou les requêtes annulées, que le serveur compte aussi.
+ */
+const INTERVALLE_LIDAR_MS = 50;
 
 /**
  * Nature de la tuile. `surface` signifie que le sursol — toits, arbres — est déjà dans
@@ -166,6 +180,8 @@ export class DemTileCache {
   private attente: (() => void)[] = [];
   /** Instant avant lequel le LiDAR n'est pas réinterrogé, après un 429. */
   private pauseLidarJusqua = 0;
+  /** Instant à partir duquel la prochaine requête LiDAR peut partir. */
+  private prochainCreneauLidar = 0;
 
   /**
    * `baseUrl` permet de pointer vers un miroir ou un jeu de tuiles local — ce dont se
@@ -334,6 +350,28 @@ export class DemTileCache {
     });
   }
 
+  /**
+   * Réserve le prochain créneau LiDAR et attend qu'il arrive. Les créneaux sont espacés
+   * d'`INTERVALLE_LIDAR_MS`, quel que soit le nombre de requêtes menées de front.
+   */
+  private async attendreCreneauLidar(signal: AbortSignal): Promise<void> {
+    const maintenant = Date.now();
+    const creneau = Math.max(maintenant, this.prochainCreneauLidar);
+    this.prochainCreneauLidar = creneau + INTERVALLE_LIDAR_MS;
+    if (creneau <= maintenant) return;
+    await new Promise<void>((resolve, reject) => {
+      const minuteur = setTimeout(() => {
+        signal.removeEventListener('abort', abandon);
+        resolve();
+      }, creneau - maintenant);
+      const abandon = () => {
+        clearTimeout(minuteur);
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', abandon, { once: true });
+    });
+  }
+
   /** Vrai tant que la limite de débit de la Géoplateforme est supposée active. */
   private lidarEnPause(): boolean {
     return Date.now() < this.pauseLidarJusqua;
@@ -357,11 +395,18 @@ export class DemTileCache {
     coord: TileCoord,
     signal: AbortSignal,
   ): Promise<Float32Array | null> {
+    await this.attendreCreneauLidar(signal);
+    // Un 429 a pu tomber pendant l'attente : partir quand même prolongerait le blocage.
+    // Lever — et non renvoyer `null` — pour que la tuile ne soit pas classée absente.
+    if (this.lidarEnPause()) throw new Error('LiDAR IGN : en pause après un 429');
     try {
       return await fetchLidarTile(coord, this.product, signal);
     } catch (erreur) {
       if (erreur instanceof LidarHttpError && erreur.status === 429) {
-        this.pauseLidarJusqua = Date.now() + PAUSE_APRES_429_MS;
+        // Le service annonce la durée du blocage — 5 s au départ d'après sa documentation ;
+        // à défaut de pouvoir la lire, une valeur un peu plus prudente.
+        const pause = Math.min(erreur.retryAfterMs ?? PAUSE_APRES_429_MS, PAUSE_MAX_MS);
+        this.pauseLidarJusqua = Date.now() + pause;
       }
       throw erreur;
     }

@@ -146,9 +146,9 @@ describe('source d’élévation', () => {
       vi.fn(async () => {
         enCours++;
         maximum = Math.max(maximum, enCours);
-        // Laisse la boucle d'événements donner leur chance aux requêtes suivantes :
-        // sans plafond, les 24 se chevaucheraient.
-        await new Promise((resolve) => setTimeout(resolve, 1));
+        // Des réponses assez lentes pour que les requêtes se chevauchent malgré
+        // l'espacement des départs : sans plafond, huit seraient en vol à la fois.
+        await new Promise((resolve) => setTimeout(resolve, 400));
         enCours--;
         return reponseBil(1050);
       }),
@@ -156,9 +156,60 @@ describe('source d’élévation', () => {
 
     const cache = new DemTileCache();
     await Promise.all(
-      Array.from({ length: 24 }, (_, i) => cache.load({ z: 15, x: 17009 + i, y: 11667 })),
+      Array.from({ length: 12 }, (_, i) => cache.load({ z: 15, x: 17009 + i, y: 11667 })),
     );
     expect(maximum).toBe(6);
+  });
+
+  // La Géoplateforme limite le WMS-Raster à 40 requêtes par seconde et par IP : le
+  // plafond de requêtes simultanées ne suffit pas quand elles répondent vite.
+  it('espace les requêtes LiDAR pour rester sous la limite de débit', async () => {
+    const departs: number[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        departs.push(performance.now());
+        return reponseBil(1050);
+      }),
+    );
+
+    const cache = new DemTileCache();
+    await Promise.all(
+      Array.from({ length: 10 }, (_, i) => cache.load({ z: 15, x: 17009 + i, y: 11667 })),
+    );
+    const ecarts = departs.slice(1).map((t, i) => t - (departs[i] as number));
+    // Tolérance d'horloge : l'intervalle visé est de 50 ms.
+    expect(Math.min(...ecarts)).toBeGreaterThanOrEqual(40);
+  });
+
+  it('respecte la durée de blocage annoncée par Retry-After', async () => {
+    let maintenant = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => maintenant);
+    const appels: string[] = [];
+    let bloque = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        appels.push(url);
+        if (url.includes('geopf') && bloque) {
+          return new Response('', { status: 429, headers: { 'Retry-After': '2' } });
+        }
+        return url.includes('geopf') ? reponseBil(1050) : reponsePng();
+      }),
+    );
+
+    const cache = new DemTileCache();
+    expect((await cache.load(COORD))?.source).toBe('terrarium');
+
+    // Pendant les deux secondes annoncées, le LiDAR n'est pas réinterrogé.
+    bloque = false;
+    maintenant += 1_500;
+    expect((await cache.load({ z: 15, x: 17010, y: 11667 }))?.source).toBe('terrarium');
+    expect(appels.filter((u) => u.includes('geopf'))).toHaveLength(1);
+
+    // Passé ce délai, il l'est de nouveau — sans attendre une pause arbitraire plus longue.
+    maintenant += 1_000;
+    expect((await cache.load({ z: 15, x: 17011, y: 11667 }))?.source).toBe('lidar');
   });
 
   // La limite de débit porte sur l'adresse IP, pas sur la tuile : insister tuile par

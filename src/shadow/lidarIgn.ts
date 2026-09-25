@@ -75,7 +75,14 @@ export const IGN_MIN_ZOOM = 13;
  * tuile-là et se retente aussitôt.
  */
 export class LidarHttpError extends Error {
-  constructor(readonly status: number) {
+  constructor(
+    readonly status: number,
+    /**
+     * Délai annoncé par `Retry-After`, en millisecondes, s'il est lisible. Le service ne
+     * l'expose pas forcément en CORS : l'appelant doit prévoir une valeur par défaut.
+     */
+    readonly retryAfterMs: number | null = null,
+  ) {
     super(`LiDAR IGN : réponse ${status}`);
     this.name = 'LidarHttpError';
   }
@@ -147,7 +154,11 @@ export async function fetchLidarTile(
 
   const response = await fetch(lidarTileUrl(coord, product), { signal, mode: 'cors' });
   if (!response.ok) {
-    throw new LidarHttpError(response.status);
+    const retryAfter = Number(response.headers.get('Retry-After'));
+    throw new LidarHttpError(
+      response.status,
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : null,
+    );
   }
 
   // Le service signale certaines erreurs en XML, avec un code 200.

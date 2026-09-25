@@ -63,9 +63,11 @@ Quelques points sensibles, détaillés dans les commentaires du code :
   au-dessus de z18 il n'apporte plus rien, en dessous de z13 non plus, puisqu'une tuile
   de 256 px couvre alors des dizaines de kilomètres et que le service doit rééchantillonner
   une emprise énorme pour un résultat que terrarium donne à l'identique. Les requêtes
-  sont par ailleurs **menées six par six**, et le LiDAR mis de côté trente secondes
-  après un `429` : la limite de débit de la Géoplateforme porte sur l'adresse IP, donc
-  insister tuile par tuile ne fait que la reconduire (`src/shadow/demTiles.ts`).
+  sont par ailleurs **menées six par six** et **espacées de 50 ms** (20 par seconde,
+  pour une limite de 40), et le LiDAR mis de côté après un `429`, le temps annoncé par
+  `Retry-After` ou dix secondes à défaut : la limite de débit de la Géoplateforme porte
+  sur l'adresse IP, donc insister tuile par tuile ne fait que la reconduire
+  (`src/shadow/demTiles.ts`).
 - Les tuiles d'élévation sont **décodées sans passer par le canvas**
   (`src/shadow/png.ts`) : `createImageBitmap` + `drawImage` + `getImageData` n'est pas
   fidèle à l'octet près, et une unité du canal rouge vaut 256 mètres. Mesuré : 78 pixels
